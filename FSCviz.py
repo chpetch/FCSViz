@@ -6,8 +6,8 @@ import numpy as np
 import plotly.graph_objects as go
 import streamlit as st
 
-st.set_page_config(page_title="FCS Viewer", layout="wide")
-st.title("FCS Viewer")
+st.set_page_config(page_title="FSCViz", layout="wide")
+st.title("FSCViz")
 
 with st.expander("How to use", expanded=False):
     st.markdown(
@@ -35,6 +35,8 @@ PRESET_COLORS = {
     "Teal":   "#17becf",
 }
 
+PLOT_TYPES = ["Scatter", "Density", "Histogram"]
+
 # --- Session state init ---
 if "fcs_data" not in st.session_state:
     # {filename: {"data": DataFrame, "channels": [str, ...]}}
@@ -44,11 +46,16 @@ if "subplot_config" not in st.session_state:
     # {(r, c): {"file": str|None, "plot_type": str, "x_ch": str|None, "y_ch": str|None, "n_bins": int}}
     st.session_state.subplot_config = {}
 
-layout_choice = st.selectbox(
-    "Grid layout",
-    list(LAYOUTS.keys()),
-    label_visibility="collapsed",
-)
+col1, col2 = st.columns([3,1])
+with col2:
+    layout_choice = st.selectbox(
+        "Grid layout",
+        list(LAYOUTS.keys()),
+        label_visibility="collapsed",
+    )
+with col1:
+    st.markdown("<p style='text-align:right;margin:0.4rem 0 0'>Plot layout:</p>", unsafe_allow_html=True)
+
 
 # --- Sidebar ---
 with st.sidebar:
@@ -75,27 +82,26 @@ with st.sidebar:
                 st.session_state.fcs_data[uf.name] = {
                     "data": data[numeric_cols],
                     "channels": numeric_cols,
+                    "meta": meta,
                 }
             except Exception as e:
                 st.error(f"Failed to parse {uf.name}: {e}")
 
-    # Remove files that are no longer in the uploader
-    if uploaded_files is not None:
-        current_names = {uf.name for uf in uploaded_files}
+    # Show loaded files with explicit remove buttons
+    if st.session_state.fcs_data:
+        st.write("**Loaded files:**")
         for name in list(st.session_state.fcs_data):
-            if name not in current_names:
+            info = st.session_state.fcs_data[name]
+            n_events = len(info["data"])
+            n_ch = len(info["channels"])
+            col_label, col_btn = st.columns([4, 1])
+            col_label.caption(f"{name}  \n{n_events:,} events · {n_ch} ch")
+            if col_btn.button("×", key=f"_rm_{name}", help=f"Remove {name}"):
                 del st.session_state.fcs_data[name]
                 for cfg in st.session_state.subplot_config.values():
                     if cfg.get("file") == name:
                         cfg.update({"configured": False, "file": None, "x_ch": None, "y_ch": None})
-
-    # Show summary of loaded files
-    if st.session_state.fcs_data:
-        st.write("**Loaded files:**")
-        for name, info in st.session_state.fcs_data.items():
-            n_events = len(info["data"])
-            n_ch = len(info["channels"])
-            st.caption(f"{name}  \n{n_events:,} events · {n_ch} channels")
+                st.rerun()
 
 rows, cols = LAYOUTS[layout_choice]
 
@@ -130,8 +136,8 @@ def plot_dialog(r: int, c: int):
     # --- Plot type ---
     plot_type = st.radio(
         "Plot type",
-        ["Scatter", "Histogram"],
-        index=0 if cfg.get("plot_type", "Scatter") == "Scatter" else 1,
+        PLOT_TYPES,
+        index=PLOT_TYPES.index(cfg.get("plot_type", "Scatter")),
         horizontal=True,
     )
 
@@ -145,7 +151,7 @@ def plot_dialog(r: int, c: int):
         x_idx = channels.index(saved_x) if saved_x in channels else 0
         y_idx = channels.index(saved_y) if saved_y in channels else min(1, len(channels) - 1)
 
-        if plot_type == "Scatter":
+        if plot_type in ("Scatter", "Density"):
             col_x, col_y = st.columns(2)
             with col_x:
                 x_ch = st.selectbox("X axis", channels, index=x_idx)
@@ -162,51 +168,54 @@ def plot_dialog(r: int, c: int):
         n_bins = st.number_input("Bins", min_value=10, max_value=1024, value=n_bins, step=10)
 
     # --- Color ---
-    saved_color = cfg.get("color", "#1f77b4")
-    saved_preset = next((k for k, v in PRESET_COLORS.items() if v == saved_color), "Custom")
-    preset_options = list(PRESET_COLORS.keys()) + ["Custom"]
+    if plot_type != "Density":
+        saved_color = cfg.get("color", "#1f77b4")
+        saved_preset = next((k for k, v in PRESET_COLORS.items() if v == saved_color), "Custom")
+        preset_options = list(PRESET_COLORS.keys()) + ["Custom"]
 
-    # Inject a unique marker span so CSS can scope to only this radio widget
-    # (sibling selector targets the color radio but not the plot-type radio above it)
-    _mid = f"cpick-{r}-{c}"
-    st.markdown(f'<span id="{_mid}"></span>', unsafe_allow_html=True)
+        # Inject a unique marker span so CSS can scope to only this radio widget
+        # (sibling selector targets the color radio but not the plot-type radio above it)
+        _mid = f"cpick-{r}-{c}"
+        st.markdown(f'<span id="{_mid}"></span>', unsafe_allow_html=True)
 
-    _rules = []
-    for _i, (_, _hex) in enumerate(PRESET_COLORS.items()):
-        _n = _i + 1
+        _rules = []
+        for _i, (_, _hex) in enumerate(PRESET_COLORS.items()):
+            _n = _i + 1
+            _rules.append(
+                f"div:has(#{_mid})~[data-testid='stRadio'] label:nth-child({_n})"
+                f"{{background:{_hex}!important;border-radius:5px!important;"
+                f"min-width:32px!important;height:26px!important;padding:0 6px!important;}}"
+                f"div:has(#{_mid})~[data-testid='stRadio'] label:nth-child({_n}) p"
+                f"{{display:none!important;}}"
+                f"div:has(#{_mid})~[data-testid='stRadio'] label:nth-child({_n})>div:first-child"
+                f"{{display:none!important;}}"
+            )
+        # Selection ring via native CSS checked state — no Python rerun needed
         _rules.append(
-            f"div:has(#{_mid})~[data-testid='stRadio'] label:nth-child({_n})"
-            f"{{background:{_hex}!important;border-radius:5px!important;"
-            f"min-width:32px!important;height:26px!important;padding:0 6px!important;}}"
-            f"div:has(#{_mid})~[data-testid='stRadio'] label:nth-child({_n}) p"
-            f"{{display:none!important;}}"
-            f"div:has(#{_mid})~[data-testid='stRadio'] label:nth-child({_n})>div:first-child"
-            f"{{display:none!important;}}"
+            f"div:has(#{_mid})~[data-testid='stRadio'] label:has(input:checked)"
+            f"{{box-shadow:0 0 0 3px #222!important;}}"
         )
-    # Selection ring via native CSS checked state — no Python rerun needed
-    _rules.append(
-        f"div:has(#{_mid})~[data-testid='stRadio'] label:has(input:checked)"
-        f"{{box-shadow:0 0 0 3px #222!important;}}"
-    )
-    st.markdown(f"<style>{''.join(_rules)}</style>", unsafe_allow_html=True)
+        st.markdown(f"<style>{''.join(_rules)}</style>", unsafe_allow_html=True)
 
-    st.write("**Color**")
-    color_choice = st.radio(
-        "Color",
-        preset_options,
-        index=preset_options.index(saved_preset),
-        horizontal=True,
-        key=f"_crad_{r}_{c}",
-        label_visibility="collapsed",
-    )
-    if color_choice == "Custom":
-        final_color = st.color_picker(
+        st.write("**Color**")
+        color_choice = st.radio(
             "Color",
-            value=saved_color if saved_preset == "Custom" else "#1f77b4",
+            preset_options,
+            index=preset_options.index(saved_preset),
+            horizontal=True,
+            key=f"_crad_{r}_{c}",
             label_visibility="collapsed",
         )
+        if color_choice == "Custom":
+            final_color = st.color_picker(
+                "Color",
+                value=saved_color if saved_preset == "Custom" else "#1f77b4",
+                label_visibility="collapsed",
+            )
+        else:
+            final_color = PRESET_COLORS[color_choice]
     else:
-        final_color = PRESET_COLORS[color_choice]
+        final_color = cfg.get("color", "#1f77b4")
 
     st.divider()
     btn1, btn2 = st.columns(2)
@@ -217,7 +226,7 @@ def plot_dialog(r: int, c: int):
                 "file": selected_file,
                 "plot_type": plot_type,
                 "x_ch": x_ch,
-                "y_ch": y_ch if plot_type == "Scatter" else None,
+                "y_ch": y_ch if plot_type in ("Scatter", "Density") else None,
                 "n_bins": n_bins,
                 "color": final_color,
             }
@@ -287,6 +296,62 @@ def make_plot_fig(r: int, c: int) -> go.Figure:
             xaxis_title=x_label if has_real_data else None,
             yaxis_title="Count",
             bargap=0.02,
+        )
+
+    elif plot_type == "Density":
+        has_density_data = has_real_data and y_ch and file in fcs_data
+
+        if has_density_data:
+            df = fcs_data[file]["data"]
+            x = df[x_ch].values
+            y = df[y_ch].values
+            x_label, y_label = x_ch, y_ch
+        else:
+            n1, n2 = int(N_CELLS * 0.6), int(N_CELLS * 0.4)
+            x = np.concatenate([rng.normal(3.5, 0.8, n1), rng.normal(6.0, 0.6, n2)])
+            y = np.concatenate([rng.normal(4.0, 0.7, n1), rng.normal(7.0, 0.5, n2)])
+            x_label, y_label = "X", "Y"
+
+        try:
+            from scipy.stats import gaussian_kde
+            from scipy.interpolate import RegularGridInterpolator
+            n_pts = len(x)
+            if n_pts > 5000:
+                idx = np.random.default_rng(seed=42).choice(n_pts, size=5000, replace=False)
+                kde = gaussian_kde(np.vstack([x[idx], y[idx]]))
+            else:
+                kde = gaussian_kde(np.vstack([x, y]))
+            g = 150
+            xi = np.linspace(x.min(), x.max(), g)
+            yi = np.linspace(y.min(), y.max(), g)
+            xi_g, yi_g = np.meshgrid(xi, yi)
+            z = kde(np.vstack([xi_g.ravel(), yi_g.ravel()])).reshape(g, g)
+            interp = RegularGridInterpolator(
+                (xi, yi), z.T, method="linear", bounds_error=False, fill_value=0
+            )
+            density = interp(np.column_stack([x, y]))
+        except Exception:
+            density = np.zeros(len(x))
+
+        trace = go.Scattergl(
+            x=x, y=y,
+            mode="markers",
+            marker=dict(
+                size=2, opacity=0.5,
+                color=density, colorscale="Viridis", showscale=True,
+                colorbar=dict(thickness=12, len=0.75, title="Density"),
+            ),
+            showlegend=False,
+            hovertemplate=f"{x_label}: %{{x:.2f}}<br>{y_label}: %{{y:.2f}}<extra></extra>",
+        )
+        fig = go.Figure(trace)
+        fig.update_layout(
+            height=260,
+            margin=dict(l=40, r=10, t=10, b=40),
+            paper_bgcolor="#ffffff",
+            plot_bgcolor="#f0f4f8",
+            xaxis_title=x_label if has_density_data else None,
+            yaxis_title=y_label if has_density_data else None,
         )
 
     else:  # Scatter
