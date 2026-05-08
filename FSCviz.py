@@ -5,6 +5,7 @@ import fcsparser
 import numpy as np
 import plotly.graph_objects as go
 import streamlit as st
+from gates import GateTree
 
 st.set_page_config(page_title="FSCViz", layout="wide")
 st.title("FSCViz")
@@ -75,11 +76,13 @@ def _demo_data(rng: np.random.Generator, n: int = N_CELLS) -> tuple:
 
 # --- Session state init ---
 if "fcs_data" not in st.session_state:
-    # {filename: {"data": DataFrame, "channels": [str, ...]}}
     st.session_state.fcs_data = {}
 
+if "gate_trees" not in st.session_state:
+    # {filename: GateTree} — one tree per loaded file
+    st.session_state.gate_trees = {}
+
 if "subplot_config" not in st.session_state:
-    # {(r, c): {"file": str|None, "plot_type": str, "x_ch": str|None, "y_ch": str|None, "n_bins": int}}
     st.session_state.subplot_config = {}
 
 if "dialog_coords" not in st.session_state:
@@ -138,6 +141,7 @@ with st.sidebar:
                     "channels": numeric_cols,
                     "meta": meta,
                 }
+                st.session_state.gate_trees[uf.name] = GateTree()
             except Exception as e:
                 st.error(f"Failed to parse {uf.name}: {e}")
 
@@ -152,6 +156,7 @@ with st.sidebar:
             col_label.caption(f"{name}  \n{n_events:,} events · {n_ch} ch")
             if col_btn.button("×", key=f"_rm_{name}", help=f"Remove {name}"):
                 del st.session_state.fcs_data[name]
+                st.session_state.gate_trees.pop(name, None)
                 for cfg in st.session_state.subplot_config.values():
                     if cfg.get("file") == name:
                         cfg.update({"configured": False, "file": None, "x_ch": None, "y_ch": None})
@@ -168,7 +173,7 @@ for r in range(1, rows + 1):
     for c in range(1, cols + 1):
         st.session_state.seeds.setdefault((r, c), (r - 1) * cols + (c - 1))
         st.session_state.subplot_config.setdefault(
-            (r, c), {"configured": False, "file": None, "plot_type": "Scatter", "x_ch": None, "y_ch": None, "n_bins": 256, "color": "#1f77b4", "x_transform": "Linear", "y_transform": "Linear", "x_cofactor": 150, "y_cofactor": 150}
+            (r, c), {"configured": False, "file": None, "plot_type": "Scatter", "x_ch": None, "y_ch": None, "n_bins": 256, "color": "#1f77b4", "x_transform": "Linear", "y_transform": "Linear", "x_cofactor": 150, "y_cofactor": 150, "gate_id": None}
         )
 
 
