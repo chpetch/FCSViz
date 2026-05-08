@@ -225,3 +225,6 @@ Example files/
 
 # Project AI instructions (local only)
 CLAUDE.md
+
+# Local-only test suite (not shipped with the app)
+tests/
