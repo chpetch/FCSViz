@@ -13,12 +13,13 @@ with st.expander("How to use", expanded=False):
     st.markdown(
         "- **Upload** one or more FCS files using the sidebar panel on the left\n"
         "- **Click a plot title** to open the configuration dialog for that panel\n"
-        "- **Select** a data source, plot type (Scatter / Histogram), channels, and color, then click **Apply**\n"
+        "- **Select** a data source, plot type (Scatter / Density / Histogram), channels, transform (Linear / Log / Ln / asinh / biex), and color, then click **Apply**\n"
         "- Click the title again at any time to reconfigure or switch channels"
     )
 
 LAYOUTS = {
     "2 × 2": (2, 2),
+    "2 × 3": (2, 3),
     "3 × 2": (3, 2),
     "3 × 3": (3, 3),
 }
@@ -36,6 +37,41 @@ PRESET_COLORS = {
 }
 
 PLOT_TYPES = ["Scatter", "Density", "Histogram"]
+TRANSFORMS = ["Linear", "Log", "Ln", "asinh", "biex"]
+
+def apply_transform(arr: np.ndarray, transform: str, cofactor: float = 150) -> np.ndarray:
+    if transform == "Log":
+        return np.where(arr > 0, np.log10(arr), np.nan)
+    if transform == "Ln":
+        return np.where(arr > 0, np.log(arr), np.nan)
+    if transform == "asinh":
+        return np.arcsinh(arr / cofactor)
+    if transform == "biex":
+        return np.sign(arr) * np.log10(np.abs(arr) / cofactor + 1)
+    return arr  # Linear
+
+
+def _axis_label(channel: str, transform: str) -> str:
+    return channel if transform == "Linear" else f"{channel} ({transform})"
+
+
+def _demo_data(rng: np.random.Generator, n: int = N_CELLS) -> tuple:
+    """Two log-normal populations spanning ~3 decades, with some negatives from compensation."""
+    n1, n2 = int(n * 0.6), int(n * 0.4)
+    x = np.concatenate([
+        rng.lognormal(mean=np.log(500),   sigma=0.6, size=n1),
+        rng.lognormal(mean=np.log(30000), sigma=0.5, size=n2),
+    ])
+    y = np.concatenate([
+        rng.lognormal(mean=np.log(400),   sigma=0.7, size=n1),
+        rng.lognormal(mean=np.log(40000), sigma=0.4, size=n2),
+    ])
+    # Add realistic negatives (~15 % of dim population) to motivate asinh/biex over log
+    neg_mask = rng.random(n1) < 0.15
+    x[:n1][neg_mask] -= rng.exponential(200, size=neg_mask.sum())
+    y[:n1][neg_mask] -= rng.exponential(150, size=neg_mask.sum())
+    return x, y
+
 
 # --- Session state init ---
 if "fcs_data" not in st.session_state:
@@ -46,16 +82,34 @@ if "subplot_config" not in st.session_state:
     # {(r, c): {"file": str|None, "plot_type": str, "x_ch": str|None, "y_ch": str|None, "n_bins": int}}
     st.session_state.subplot_config = {}
 
-col1, col2 = st.columns([3,1])
+if "dialog_coords" not in st.session_state:
+    st.session_state.dialog_coords = (1, 1)
+
+st.divider()
+col1, col2 = st.columns([5, 1], vertical_alignment="center")
 with col2:
+    st.markdown('<span id="_layout_sel"></span>', unsafe_allow_html=True)
     layout_choice = st.selectbox(
         "Grid layout",
         list(LAYOUTS.keys()),
         label_visibility="collapsed",
     )
 with col1:
-    st.markdown("<p style='text-align:right;margin:0.4rem 0 0'>Plot layout:</p>", unsafe_allow_html=True)
+    st.markdown("<p style='text-align:right;margin:0'>Plot layout:</p>", unsafe_allow_html=True)
 
+st.markdown(
+    "<style>"
+    "div:has(#_layout_sel) [data-testid='stSelectbox'] [data-baseweb='select'] div{"
+    "text-align:center!important;justify-content:center!important;}"
+    "[data-baseweb='menu'] li{"
+    "text-align:center!important;justify-content:center!important;}"
+    "[data-baseweb='menu'] li div{"
+    "text-align:center!important;justify-content:center!important;}"
+    "[data-baseweb='popover'] li{"
+    "text-align:center!important;justify-content:center!important;}"
+    "</style>",
+    unsafe_allow_html=True,
+)
 
 # --- Sidebar ---
 with st.sidebar:
@@ -114,17 +168,17 @@ for r in range(1, rows + 1):
     for c in range(1, cols + 1):
         st.session_state.seeds.setdefault((r, c), (r - 1) * cols + (c - 1))
         st.session_state.subplot_config.setdefault(
-            (r, c), {"configured": False, "file": None, "plot_type": "Scatter", "x_ch": None, "y_ch": None, "n_bins": 256, "color": "#1f77b4"}
+            (r, c), {"configured": False, "file": None, "plot_type": "Scatter", "x_ch": None, "y_ch": None, "n_bins": 256, "color": "#1f77b4", "x_transform": "Linear", "y_transform": "Linear", "x_cofactor": 150, "y_cofactor": 150}
         )
 
 
-@st.dialog("Configure Plot")
+_dr, _dc = st.session_state.dialog_coords
+
+
+@st.dialog(f"Configure subplot ({_dr}, {_dc})")
 def plot_dialog(r: int, c: int):
     cfg = st.session_state.subplot_config[(r, c)]
     fcs_data = st.session_state.fcs_data
-
-    st.subheader(f"Subplot ({r}, {c})")
-    st.divider()
 
     # --- File selector ---
     file_options = [_NO_FILE] + list(fcs_data.keys())
@@ -141,8 +195,15 @@ def plot_dialog(r: int, c: int):
         horizontal=True,
     )
 
-    # --- Channel selectors ---
+    # --- Channel selectors + transforms ---
     x_ch = y_ch = None
+    x_transform = cfg.get("x_transform", "Linear")
+    y_transform = cfg.get("y_transform", "Linear")
+    x_cofactor = cfg.get("x_cofactor", 150)
+    y_cofactor = cfg.get("y_cofactor", 150)
+    x_tr_idx = TRANSFORMS.index(x_transform) if x_transform in TRANSFORMS else 0
+    y_tr_idx = TRANSFORMS.index(y_transform) if y_transform in TRANSFORMS else 0
+
     if selected_file:
         channels = fcs_data[selected_file]["channels"]
         file_unchanged = cfg.get("file") == selected_file
@@ -155,18 +216,44 @@ def plot_dialog(r: int, c: int):
             col_x, col_y = st.columns(2)
             with col_x:
                 x_ch = st.selectbox("X axis", channels, index=x_idx)
+                x_transform = st.selectbox("X transform", TRANSFORMS, index=x_tr_idx, key=f"_xtr_{r}_{c}")
+                if x_transform in ("asinh", "biex"):
+                    x_cofactor = st.number_input("X cofactor", min_value=1, max_value=100_000, value=x_cofactor, step=10, key=f"_xcof_{r}_{c}")
             with col_y:
                 y_ch = st.selectbox("Y axis", channels, index=y_idx)
-        else:
+                y_transform = st.selectbox("Y transform", TRANSFORMS, index=y_tr_idx, key=f"_ytr_{r}_{c}")
+                if y_transform in ("asinh", "biex"):
+                    y_cofactor = st.number_input("Y cofactor", min_value=1, max_value=100_000, value=y_cofactor, step=10, key=f"_ycof_{r}_{c}")
+        else:  # Histogram
             x_ch = st.selectbox("Channel", channels, index=x_idx)
+            x_transform = st.selectbox("Transform", TRANSFORMS, index=x_tr_idx, key=f"_xtr_{r}_{c}")
+            if x_transform in ("asinh", "biex"):
+                x_cofactor = st.number_input("Cofactor", min_value=1, max_value=100_000, value=x_cofactor, step=10, key=f"_xcof_{r}_{c}")
+            y_transform = "Linear"
     else:
         st.caption("No file selected — subplot will show random data.")
+        if plot_type in ("Scatter", "Density"):
+            col_x, col_y = st.columns(2)
+            with col_x:
+                x_transform = st.selectbox("X transform", TRANSFORMS, index=x_tr_idx, key=f"_xtr_{r}_{c}")
+                if x_transform in ("asinh", "biex"):
+                    x_cofactor = st.number_input("X cofactor", min_value=1, max_value=100_000, value=x_cofactor, step=10, key=f"_xcof_{r}_{c}")
+            with col_y:
+                y_transform = st.selectbox("Y transform", TRANSFORMS, index=y_tr_idx, key=f"_ytr_{r}_{c}")
+                if y_transform in ("asinh", "biex"):
+                    y_cofactor = st.number_input("Y cofactor", min_value=1, max_value=100_000, value=y_cofactor, step=10, key=f"_ycof_{r}_{c}")
+        else:  # Histogram
+            x_transform = st.selectbox("Transform", TRANSFORMS, index=x_tr_idx, key=f"_xtr_{r}_{c}")
+            if x_transform in ("asinh", "biex"):
+                x_cofactor = st.number_input("Cofactor", min_value=1, max_value=100_000, value=x_cofactor, step=10, key=f"_xcof_{r}_{c}")
+            y_transform = "Linear"
 
     # --- Bin count (histogram only) ---
     n_bins = cfg.get("n_bins", 256)
     if plot_type == "Histogram":
         n_bins = st.number_input("Bins", min_value=10, max_value=1024, value=n_bins, step=10)
 
+    st.divider()
     # --- Color ---
     if plot_type != "Density":
         saved_color = cfg.get("color", "#1f77b4")
@@ -179,21 +266,20 @@ def plot_dialog(r: int, c: int):
         st.markdown(f'<span id="{_mid}"></span>', unsafe_allow_html=True)
 
         _rules = []
-        for _i, (_, _hex) in enumerate(PRESET_COLORS.items()):
+        for _i, (_name, _hex) in enumerate(PRESET_COLORS.items()):
             _n = _i + 1
             _rules.append(
-                f"div:has(#{_mid})~[data-testid='stRadio'] label:nth-child({_n})"
-                f"{{background:{_hex}!important;border-radius:5px!important;"
-                f"min-width:32px!important;height:26px!important;padding:0 6px!important;}}"
-                f"div:has(#{_mid})~[data-testid='stRadio'] label:nth-child({_n}) p"
-                f"{{display:none!important;}}"
+                # Hide the radio circle
                 f"div:has(#{_mid})~[data-testid='stRadio'] label:nth-child({_n})>div:first-child"
                 f"{{display:none!important;}}"
+                # Color the label text
+                f"div:has(#{_mid})~[data-testid='stRadio'] label:nth-child({_n}) p"
+                f"{{color:{_hex}!important;font-weight:700!important;font-size:14px!important;}}"
             )
-        # Selection ring via native CSS checked state — no Python rerun needed
+        # Underline the selected option instead of a box ring
         _rules.append(
-            f"div:has(#{_mid})~[data-testid='stRadio'] label:has(input:checked)"
-            f"{{box-shadow:0 0 0 3px #222!important;}}"
+            f"div:has(#{_mid})~[data-testid='stRadio'] label:has(input:checked) p"
+            f"{{text-decoration:underline!important;text-underline-offset:3px!important;}}"
         )
         st.markdown(f"<style>{''.join(_rules)}</style>", unsafe_allow_html=True)
 
@@ -229,6 +315,10 @@ def plot_dialog(r: int, c: int):
                 "y_ch": y_ch if plot_type in ("Scatter", "Density") else None,
                 "n_bins": n_bins,
                 "color": final_color,
+                "x_transform": x_transform,
+                "y_transform": y_transform,
+                "x_cofactor": x_cofactor,
+                "y_cofactor": y_cofactor,
             }
             if not selected_file:
                 st.session_state.seeds[(r, c)] = np.random.randint(0, 100_000)
@@ -264,6 +354,8 @@ def make_plot_fig(r: int, c: int) -> go.Figure:
     y_ch = cfg.get("y_ch")
     n_bins = cfg.get("n_bins", 256)
     color = cfg.get("color", "#1f77b4")
+    x_transform = cfg.get("x_transform", "Linear")
+    y_transform = cfg.get("y_transform", "Linear")
 
     has_real_data = file and file in fcs_data and x_ch
     has_scatter_data = has_real_data and plot_type == "Scatter" and y_ch
@@ -273,12 +365,12 @@ def make_plot_fig(r: int, c: int) -> go.Figure:
 
     if plot_type == "Histogram":
         if has_real_data:
-            x = fcs_data[file]["data"][x_ch].values
-            x_label = x_ch
+            x = apply_transform(fcs_data[file]["data"][x_ch].values, x_transform)
+            x_label = _axis_label(x_ch, x_transform)
         else:
-            n1, n2 = int(N_CELLS * 0.6), int(N_CELLS * 0.4)
-            x = np.concatenate([rng.normal(3.5, 0.8, n1), rng.normal(6.0, 0.6, n2)])
-            x_label = "X"
+            x_raw, _ = _demo_data(rng)
+            x = apply_transform(x_raw, x_transform)
+            x_label = _axis_label("X", x_transform)
 
         trace = go.Histogram(
             x=x,
@@ -303,33 +395,40 @@ def make_plot_fig(r: int, c: int) -> go.Figure:
 
         if has_density_data:
             df = fcs_data[file]["data"]
-            x = df[x_ch].values
-            y = df[y_ch].values
-            x_label, y_label = x_ch, y_ch
+            x = apply_transform(df[x_ch].values, x_transform)
+            y = apply_transform(df[y_ch].values, y_transform)
+            x_label, y_label = _axis_label(x_ch, x_transform), _axis_label(y_ch, y_transform)
         else:
-            n1, n2 = int(N_CELLS * 0.6), int(N_CELLS * 0.4)
-            x = np.concatenate([rng.normal(3.5, 0.8, n1), rng.normal(6.0, 0.6, n2)])
-            y = np.concatenate([rng.normal(4.0, 0.7, n1), rng.normal(7.0, 0.5, n2)])
-            x_label, y_label = "X", "Y"
+            x_raw, y_raw = _demo_data(rng)
+            x = apply_transform(x_raw, x_transform)
+            y = apply_transform(y_raw, y_transform)
+            x_label, y_label = _axis_label("X", x_transform), _axis_label("Y", y_transform)
+
+        # Drop NaNs before KDE (produced by Log/Ln on non-positive values)
+        valid = np.isfinite(x) & np.isfinite(y)
+        x_v, y_v = x[valid], y[valid]
 
         try:
             from scipy.stats import gaussian_kde
             from scipy.interpolate import RegularGridInterpolator
-            n_pts = len(x)
+            n_pts = len(x_v)
             if n_pts > 5000:
                 idx = np.random.default_rng(seed=42).choice(n_pts, size=5000, replace=False)
-                kde = gaussian_kde(np.vstack([x[idx], y[idx]]))
+                kde = gaussian_kde(np.vstack([x_v[idx], y_v[idx]]))
             else:
-                kde = gaussian_kde(np.vstack([x, y]))
+                kde = gaussian_kde(np.vstack([x_v, y_v]))
             g = 150
-            xi = np.linspace(x.min(), x.max(), g)
-            yi = np.linspace(y.min(), y.max(), g)
+            xi = np.linspace(x_v.min(), x_v.max(), g)
+            yi = np.linspace(y_v.min(), y_v.max(), g)
             xi_g, yi_g = np.meshgrid(xi, yi)
             z = kde(np.vstack([xi_g.ravel(), yi_g.ravel()])).reshape(g, g)
             interp = RegularGridInterpolator(
                 (xi, yi), z.T, method="linear", bounds_error=False, fill_value=0
             )
-            density = interp(np.column_stack([x, y]))
+            density = np.where(valid, interp(np.column_stack([
+                np.where(valid, x, x_v[0]),
+                np.where(valid, y, y_v[0]),
+            ])), 0)
         except Exception:
             density = np.zeros(len(x))
 
@@ -338,7 +437,7 @@ def make_plot_fig(r: int, c: int) -> go.Figure:
             mode="markers",
             marker=dict(
                 size=2, opacity=0.5,
-                color=density, colorscale="Viridis", showscale=True,
+                color=density, colorscale="Jet", showscale=True,
                 colorbar=dict(thickness=12, len=0.75, title="Density"),
             ),
             showlegend=False,
@@ -357,14 +456,14 @@ def make_plot_fig(r: int, c: int) -> go.Figure:
     else:  # Scatter
         if has_scatter_data:
             df = fcs_data[file]["data"]
-            x = df[x_ch].values
-            y = df[y_ch].values
-            x_label, y_label = x_ch, y_ch
+            x = apply_transform(df[x_ch].values, x_transform)
+            y = apply_transform(df[y_ch].values, y_transform)
+            x_label, y_label = _axis_label(x_ch, x_transform), _axis_label(y_ch, y_transform)
         else:
-            n1, n2 = int(N_CELLS * 0.6), int(N_CELLS * 0.4)
-            x = np.concatenate([rng.normal(3.5, 0.8, n1), rng.normal(6.0, 0.6, n2)])
-            y = np.concatenate([rng.normal(4.0, 0.7, n1), rng.normal(7.0, 0.5, n2)])
-            x_label, y_label = "X", "Y"
+            x_raw, y_raw = _demo_data(rng)
+            x = apply_transform(x_raw, x_transform)
+            y = apply_transform(y_raw, y_transform)
+            x_label, y_label = _axis_label("X", x_transform), _axis_label("Y", y_transform)
 
         trace = go.Scattergl(
             x=x, y=y,
@@ -386,6 +485,180 @@ def make_plot_fig(r: int, c: int) -> go.Figure:
     return fig
 
 
+# --- Export helpers ---
+
+def _render_subplot_png(r: int, c: int, cell_w: int = 700, cell_h: int = 520):
+    """Return PNG bytes for one subplot, or None if kaleido is unavailable."""
+    try:
+        import plotly.io as pio
+        fig = make_plot_fig(r, c)
+        fig.update_layout(width=cell_w, height=cell_h, margin=dict(l=100, r=50, t=40, b=80))
+        return pio.to_image(fig, format="png", width=cell_w, height=cell_h, scale=1)
+    except Exception:
+        return None
+
+
+def _build_grid_image(rows: int, cols: int, cell_w: int = 700, cell_h: int = 520):
+    """Return a PIL Image of the full subplot grid."""
+    from PIL import Image
+    import io
+
+    grid_img = Image.new("RGB", (cell_w * cols, cell_h * rows), color=(255, 255, 255))
+    for r in range(1, rows + 1):
+        for c in range(1, cols + 1):
+            png_bytes = _render_subplot_png(r, c, cell_w, cell_h)
+            if png_bytes:
+                cell_img = Image.open(io.BytesIO(png_bytes))
+                grid_img.paste(cell_img, ((c - 1) * cell_w, (r - 1) * cell_h))
+    return grid_img
+
+
+def _export_png(rows: int, cols: int) -> bytes:
+    from PIL import Image
+    import io
+
+    img = _build_grid_image(rows, cols)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG", dpi=(150, 150))
+    return buf.getvalue()
+
+
+def _export_pdf(rows: int, cols: int) -> bytes:
+    from PIL import Image
+    import io
+    from reportlab.lib.pagesizes import A4, landscape
+    from reportlab.lib import colors
+    from reportlab.lib.units import mm
+    from reportlab.platypus import (
+        SimpleDocTemplate, Image as RLImage, Spacer, Table, TableStyle,
+        Paragraph, PageBreak,
+    )
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.enums import TA_CENTER
+
+    buf = io.BytesIO()
+    page_w, page_h = landscape(A4)
+    doc = SimpleDocTemplate(
+        buf,
+        pagesize=landscape(A4),
+        leftMargin=15 * mm, rightMargin=15 * mm,
+        topMargin=15 * mm, bottomMargin=15 * mm,
+    )
+
+    title_style = ParagraphStyle(
+        "title", fontName="Helvetica-Bold", alignment=TA_CENTER,
+        textColor=colors.HexColor("#1a5276"), fontSize=16,
+        leading=20, spaceBefore=0, spaceAfter=4,
+    )
+    heading_style = ParagraphStyle(
+        "heading", fontName="Helvetica-Bold",
+        textColor=colors.HexColor("#1a5276"), fontSize=12,
+        leading=16, spaceBefore=8, spaceAfter=4,
+    )
+
+    story = []
+
+    # Page 1: plot grid — fills entire page (no title)
+    grid_img = _build_grid_image(rows, cols, cell_w=700, cell_h=520)
+    img_buf = io.BytesIO()
+    grid_img.save(img_buf, format="PNG")
+    img_buf.seek(0)
+
+    avail_w = page_w - 30 * mm
+    avail_h = page_h - 30 * mm - 16  # reportlab internal frame is ~12pt shorter than (page_h - margins)
+    scale = min(avail_w / grid_img.width, avail_h / grid_img.height)
+    rl_img = RLImage(img_buf, width=grid_img.width * scale, height=grid_img.height * scale)
+    story.append(rl_img)
+
+    # Metadata — one page per file
+    fcs_data = st.session_state.get("fcs_data", {})
+    if fcs_data:
+        story.append(PageBreak())
+        story.append(Paragraph("FCS File Metadata", title_style))
+        story.append(Spacer(1, 4 * mm))
+
+        def _get(meta, key, fallback="—"):
+            val = meta.get(key)
+            return str(val).strip() if val is not None and str(val).strip() else fallback
+
+        _COL_LABELS = {
+            "$PnN": "Name", "$PnS": "Label / Stain", "$PnV": "Voltage",
+            "$PnG": "Gain", "$PnR": "Range", "$PnB": "Bits",
+            "$PnE": "Amplification", "$PnT": "Detector",
+        }
+
+        table_style = TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1a5276")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("FONTSIZE", (0, 0), (-1, -1), 7),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.HexColor("#eaf3fb"), colors.white]),
+            ("GRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#aaaaaa")),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("TOPPADDING", (0, 0), (-1, -1), 2),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+        ])
+
+        file_list = list(fcs_data.items())
+        for file_idx, (filename, info) in enumerate(file_list):
+            meta = info.get("meta", {})
+            n_events = len(info["data"])
+            n_channels = len(info["channels"])
+
+            story.append(Paragraph(filename, heading_style))
+
+            # Summary table
+            raw_summary = {
+                "Instrument ($CYT)": _get(meta, "$CYT"),
+                "Date ($DATE)": _get(meta, "$DATE"),
+                "Total events": _get(meta, "$TOT", str(n_events)),
+                "Parameters": _get(meta, "$PAR", str(n_channels)),
+                "Sample ($SRC)": _get(meta, "$SRC"),
+            }
+            filtered = {k: v for k, v in raw_summary.items() if v != "—"}
+            if filtered:
+                sum_data = [["Field", "Value"]] + [[k, v] for k, v in filtered.items()]
+                sum_table = Table(sum_data, colWidths=[60 * mm, 80 * mm])
+                sum_table.setStyle(table_style)
+                story.append(sum_table)
+                story.append(Spacer(1, 3 * mm))
+
+            # Channel parameters table — keep only columns with known labels
+            import pandas as pd
+            _known = set(_COL_LABELS.values())
+            channels_df = meta.get("_channels_")
+            if channels_df is not None and isinstance(channels_df, pd.DataFrame) and not channels_df.empty:
+                df = channels_df.copy().rename(columns={k: v for k, v in _COL_LABELS.items() if k in channels_df.columns})
+                df = df[[c for c in df.columns if c in _known]]
+                df = df.fillna("—")
+                df = df.loc[:, (df != "—").any(axis=0)]
+            else:
+                try:
+                    n_par = int(str(meta.get("$PAR", n_channels)).strip())
+                except (ValueError, TypeError):
+                    n_par = n_channels
+                rows_data = [{"#": i, **{v: _get(meta, f"$P{i}{k[2:]}") for k, v in _COL_LABELS.items()}}
+                              for i in range(1, n_par + 1)]
+                df = pd.DataFrame(rows_data).set_index("#") if rows_data else pd.DataFrame()
+                if not df.empty:
+                    df = df.loc[:, (df != "—").any(axis=0)]
+
+            if not df.empty:
+                ch_headers = ["#"] + list(df.columns)
+                avail_col_w = (page_w - 30 * mm) / len(ch_headers)
+                ch_data = [ch_headers] + [[str(i + 1)] + [str(v) for v in row] for i, row in enumerate(df.values)]
+                ch_table = Table(ch_data, colWidths=[avail_col_w] * len(ch_headers))
+                ch_table.setStyle(table_style)
+                story.append(ch_table)
+
+            if file_idx < len(file_list) - 1:
+                story.append(PageBreak())
+
+    doc.build(story)
+    buf.seek(0)
+    return buf.read()
+
+
 def subplot_label(r: int, c: int) -> str:
     cfg = st.session_state.subplot_config.get((r, c), {})
 
@@ -395,11 +668,15 @@ def subplot_label(r: int, c: int) -> str:
     file = cfg.get("file")
     if file:
         stem = os.path.splitext(file)[0]
-        truncated = stem[:20] + "..." if len(stem) > 20 else stem
+        truncated = stem[:25] + "..." if len(stem) > 25 else stem
         n_events = len(st.session_state.fcs_data[file]["data"])
         return f"{truncated} (n = {n_events:,})"
 
     return "Demo (random data)"
+
+
+def _set_dialog_coords(r: int, c: int):
+    st.session_state.dialog_coords = (r, c)
 
 
 # --- Grid ---
@@ -410,7 +687,14 @@ for r in range(1, rows + 1):
     for c_idx, col_widget in enumerate(grid_cols):
         c = c_idx + 1
         with col_widget:
-            if st.button(subplot_label(r, c), key=f"title_{r}_{c}", use_container_width=True):
+            if st.button(
+                subplot_label(r, c),
+                key=f"title_{r}_{c}",
+                use_container_width=True,
+                type="tertiary",
+                on_click=_set_dialog_coords,
+                args=(r, c),
+            ):
                 clicked_subplot = (r, c)
             st.plotly_chart(
                 make_plot_fig(r, c),
@@ -420,3 +704,40 @@ for r in range(1, rows + 1):
 
 if clicked_subplot:
     plot_dialog(*clicked_subplot)
+
+# --- Export ---
+st.divider()
+st.subheader("Export")
+
+exp_col1, exp_col2, exp_col3 = st.columns([2, 2, 2])
+
+with exp_col1:
+    if st.button("Export PNG", type="primary", use_container_width=True):
+        with st.spinner("Rendering subplots…"):
+            try:
+                st.session_state._export_data = _export_png(rows, cols)
+                st.session_state._export_fmt = "png"
+                st.session_state._export_mime = "image/png"
+                st.session_state._export_ready = True
+            except Exception as e:
+                st.error(f"PNG export failed: {e}")
+
+with exp_col2:
+    if st.button("Export PDF", type="primary", use_container_width=True):
+        with st.spinner("Rendering subplots…"):
+            try:
+                st.session_state._export_data = _export_pdf(rows, cols)
+                st.session_state._export_fmt = "pdf"
+                st.session_state._export_mime = "application/pdf"
+                st.session_state._export_ready = True
+            except Exception as e:
+                st.error(f"PDF export failed: {e}")
+
+if st.session_state.get("_export_ready"):
+    with exp_col3:
+        st.download_button(
+            label=f"Download {st.session_state._export_fmt.upper()}",
+            data=st.session_state._export_data,
+            file_name=f"fscviz_export.{st.session_state._export_fmt}",
+            mime=st.session_state._export_mime,
+        )

@@ -4,3 +4,6 @@ numpy>=1.26
 pandas>=2.0
 fcsparser>=0.2
 scipy>=1.11
+kaleido==0.2.1
+Pillow>=10.0
+reportlab>=4.0
