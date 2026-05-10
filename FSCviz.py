@@ -123,6 +123,16 @@ def _hex_to_rgba(hex_color, alpha=0.12):
     return f"rgba({r},{g},{b},{alpha})"
 
 
+def _fmt_n(n: int) -> str:
+    """Compact event count: raw if <10k, else 3-sig-fig scientific (e.g. 6.30E4)."""
+    if n < 10_000:
+        return f"{n:,}"
+    exp = int(np.floor(np.log10(max(n, 1))))
+    m = n / 10 ** exp
+    mantissa = f"{m:.2f}".rstrip("0").rstrip(".")
+    return f"{mantissa}E{exp}"
+
+
 def _selection_fingerprint(sel):
     return json.dumps(sel, sort_keys=True, default=str)
 
@@ -161,6 +171,9 @@ if "subplot_gates" not in st.session_state:
 
 if "hover_pt" not in st.session_state:
     st.session_state.hover_pt = {}        # {(r, c): (hx, hy)} — current hover position per subplot
+
+if "file_labels" not in st.session_state:
+    st.session_state.file_labels = {}     # {filename: "File 1", ...}
 
 st.divider()
 col1, col2 = st.columns([5, 1], vertical_alignment="center")
@@ -244,7 +257,7 @@ with _tool_cols[-1]:
                         y_channel=_cfg_d.get("y_ch") or "Y",
                         params={"vertices": _raw_verts},
                     )
-                    st.session_state.pending_gate = {"gate_obj": _g, "file": _cfg_d.get("file"), "subplot_rc": _drawing_rc}
+                    st.session_state.pending_gate = {"gate_obj": _g, "file": _cfg_d.get("file"), "subplot_rc": _drawing_rc, "parent_id": _cfg_d.get("gate_id") or GateTree.ROOT_ID}
                     st.session_state.gate_vertices = []
                     st.session_state.drawing_subplot = None
                     st.rerun()
@@ -279,6 +292,9 @@ with st.sidebar:
                     "meta": meta,
                 }
                 st.session_state.gate_trees[uf.name] = GateTree()
+                if uf.name not in st.session_state.file_labels:
+                    _next_n = len(st.session_state.file_labels) + 1
+                    st.session_state.file_labels[uf.name] = f"File {_next_n}"
             except Exception as e:
                 st.error(f"Failed to parse {uf.name}: {e}")
 
@@ -290,7 +306,8 @@ with st.sidebar:
             n_events = len(info["data"])
             n_ch = len(info["channels"])
             col_label, col_btn = st.columns([4, 1])
-            col_label.caption(f"{name}  \n{n_events:,} events · {n_ch} ch")
+            _lbl = st.session_state.file_labels.get(name, name)
+            col_label.caption(f"**{_lbl}** — {os.path.basename(name)}  \n{n_events:,} events · {n_ch} ch")
             if col_btn.button("×", key=f"_rm_{name}", help=f"Remove {name}"):
                 _rm_tree = st.session_state.gate_trees.pop(name, None)
                 if _rm_tree:
@@ -298,6 +315,7 @@ with st.sidebar:
                     for _sg in st.session_state.get("subplot_gates", {}).values():
                         _sg -= _rm_ids
                 del st.session_state.fcs_data[name]
+                st.session_state.file_labels.pop(name, None)
                 for cfg in st.session_state.subplot_config.values():
                     if cfg.get("file") == name:
                         cfg.update({"configured": False, "file": None, "x_ch": None, "y_ch": None})
@@ -307,27 +325,28 @@ with st.sidebar:
     _any_gates = any(len(t) > 0 for t in st.session_state.gate_trees.values())
     if st.session_state.fcs_data and _any_gates:
         st.divider()
-        st.write("**Gates**")
+        st.write("**Gate stats**")
         for _fname, _tree in st.session_state.gate_trees.items():
             if _fname not in st.session_state.fcs_data or len(_tree) == 0:
                 continue
             _fdata = st.session_state.fcs_data[_fname]["data"]
             _flat = _tree.flat_list()
-            st.caption(os.path.splitext(os.path.basename(_fname))[0])
+            st.caption(st.session_state.file_labels.get(_fname, os.path.basename(_fname)))
             for _depth, _gate in _flat:
                 _n = _tree.event_count(_gate.id, _fdata)
                 _pct = _tree.percent_of_parent(_gate.id, _fdata)
-                _col_info, _col_del = st.columns([5, 1])
-                with _col_info:
-                    _pad = _depth * 16
+                _prefix = ("&nbsp;&nbsp;" * (_depth - 1) + "└─&nbsp;") if _depth > 0 else ""
+                _rcols = st.columns([9, 1])
+                with _rcols[0]:
                     st.markdown(
-                        f'<div style="margin-left:{_pad}px;line-height:1.3">'
-                        f'<span style="color:{_gate.color};font-weight:600">{_gate.name}</span>'
-                        f'<br><span style="font-size:0.72rem;color:#888">'
-                        f'{_n:,} · {_pct:.1f}%</span></div>',
+                        f'<div style="display:flex;align-items:center;gap:6px;line-height:1.4">'
+                        f'<span style="color:{_gate.color};font-weight:600;font-size:0.85rem">'
+                        f'{_prefix}{_gate.name}</span>'
+                        f'<span style="font-size:0.78rem;color:#666;white-space:nowrap">'
+                        f'{_fmt_n(_n)} · {_pct:.1f}%</span></div>',
                         unsafe_allow_html=True,
                     )
-                with _col_del:
+                with _rcols[1]:
                     if st.button("×", key=f"_del_gate_{_gate.id}",
                                  help=f"Delete {_gate.name}"):
                         _tree.remove_gate(_gate.id)
@@ -362,11 +381,35 @@ def plot_dialog(r: int, c: int):
     fcs_data = st.session_state.fcs_data
 
     # --- File selector ---
-    file_options = [_NO_FILE] + list(fcs_data.keys())
     saved_file = cfg.get("file")
-    file_idx = file_options.index(saved_file) if saved_file in file_options else 0
-    selected_label = st.selectbox("Data source", file_options, index=file_idx)
-    selected_file = None if selected_label == _NO_FILE else selected_label
+    _label_map = {st.session_state.file_labels.get(f, f): f for f in fcs_data.keys()}
+    file_display_opts = [_NO_FILE] + list(_label_map.keys())
+    saved_display = st.session_state.file_labels.get(saved_file, saved_file) if saved_file else _NO_FILE
+    file_idx = file_display_opts.index(saved_display) if saved_display in file_display_opts else 0
+    selected_display = st.selectbox("Data source", file_display_opts, index=file_idx)
+    selected_file = None if selected_display == _NO_FILE else _label_map.get(selected_display)
+
+    # --- Display population selector ---
+    # Reset gate_id when the file changes; preserve it when the file is unchanged
+    selected_gate_id = cfg.get("gate_id") if cfg.get("file") == selected_file else None
+
+    if selected_file and selected_file in st.session_state.gate_trees:
+        _pop_tree = st.session_state.gate_trees[selected_file]
+        if len(_pop_tree) > 0:
+            _flat = _pop_tree.flat_list()
+            _pop_labels = ["All Events"] + [
+                " > ".join([a.name for a in _pop_tree.get_ancestors(_g.id)] + [_g.name])
+                for _, _g in _flat
+            ]
+            _pop_ids = [None] + [_g.id for _, _g in _flat]
+            _saved_pop_idx = _pop_ids.index(selected_gate_id) if selected_gate_id in _pop_ids else 0
+            _pop_choice = st.selectbox(
+                "Display population",
+                range(len(_pop_labels)),
+                format_func=lambda i: _pop_labels[i],
+                index=_saved_pop_idx,
+            )
+            selected_gate_id = _pop_ids[_pop_choice]
 
     # --- Plot type ---
     plot_type = st.radio(
@@ -508,7 +551,7 @@ def plot_dialog(r: int, c: int):
                 "y_transform": y_transform,
                 "x_cofactor": x_cofactor,
                 "y_cofactor": y_cofactor,
-                "gate_id": st.session_state.subplot_config[(r, c)].get("gate_id"),
+                "gate_id": selected_gate_id,
             }
             if not selected_file:
                 st.session_state.seeds[(r, c)] = np.random.randint(0, 100_000)
@@ -547,6 +590,21 @@ def make_plot_fig(r: int, c: int) -> go.Figure:
     x_transform = cfg.get("x_transform", "Linear")
     y_transform = cfg.get("y_transform", "Linear")
 
+    _gate_id = cfg.get("gate_id")
+    if file and file in fcs_data:
+        _df_all = fcs_data[file]["data"]
+        if _gate_id and file in st.session_state.gate_trees:
+            _gtree = st.session_state.gate_trees[file]
+            if _gate_id in _gtree._gates:
+                _mask = _gtree.get_mask(_gate_id, _df_all)
+                _file_df = _df_all[_mask].reset_index(drop=True)
+            else:
+                _file_df = _df_all
+        else:
+            _file_df = _df_all
+    else:
+        _file_df = None
+
     has_real_data = file and file in fcs_data and x_ch
     has_scatter_data = has_real_data and plot_type == "Scatter" and y_ch
 
@@ -555,7 +613,7 @@ def make_plot_fig(r: int, c: int) -> go.Figure:
 
     if plot_type == "Histogram":
         if has_real_data:
-            x = apply_transform(fcs_data[file]["data"][x_ch].values, x_transform)
+            x = apply_transform(_file_df[x_ch].values, x_transform)
             x_label = _axis_label(x_ch, x_transform)
         else:
             x_raw, _ = _demo_data(rng)
@@ -584,7 +642,7 @@ def make_plot_fig(r: int, c: int) -> go.Figure:
         has_density_data = has_real_data and y_ch and file in fcs_data
 
         if has_density_data:
-            df = fcs_data[file]["data"]
+            df = _file_df
             x = apply_transform(df[x_ch].values, x_transform)
             y = apply_transform(df[y_ch].values, y_transform)
             x_label, y_label = _axis_label(x_ch, x_transform), _axis_label(y_ch, y_transform)
@@ -645,7 +703,7 @@ def make_plot_fig(r: int, c: int) -> go.Figure:
 
     else:  # Scatter
         if has_scatter_data:
-            df = fcs_data[file]["data"]
+            df = _file_df
             x = apply_transform(df[x_ch].values, x_transform)
             y = apply_transform(df[y_ch].values, y_transform)
             x_label, y_label = _axis_label(x_ch, x_transform), _axis_label(y_ch, y_transform)
@@ -816,7 +874,7 @@ def _render_drawing_chart(r, c, tool):
                             "y_max": _inverse_transform(y_max, _y_tr, _y_cof),
                         },
                     )
-                    st.session_state.pending_gate = {"gate_obj": gate, "file": cfg.get("file"), "subplot_rc": (r, c)}
+                    st.session_state.pending_gate = {"gate_obj": gate, "file": cfg.get("file"), "subplot_rc": (r, c), "parent_id": cfg.get("gate_id") or GateTree.ROOT_ID}
                     st.session_state.drawing_subplot = None
                     st.rerun()
 
@@ -874,12 +932,13 @@ def _render_drawing_chart(r, c, tool):
                         _ry = _inverse_transform(float(y), _y_tr, _y_cof)
                         if file and file in st.session_state.gate_trees:
                             tree = st.session_state.gate_trees[file]
+                            _parent_id = cfg.get("gate_id") or GateTree.ROOT_ID
                             if tool == "quadrant":
-                                _new_ids = tree.add_quadrant_gates(GateTree.ROOT_ID, x_ch, y_ch, _rx, _ry)
+                                _new_ids = tree.add_quadrant_gates(_parent_id, x_ch, y_ch, _rx, _ry)
                             elif tool == "threshold_v":
-                                _new_ids = tree.add_threshold_pair(GateTree.ROOT_ID, "v", x_ch, _rx)
+                                _new_ids = tree.add_threshold_pair(_parent_id, "v", x_ch, _rx)
                             elif tool == "threshold_h":
-                                _new_ids = tree.add_threshold_pair(GateTree.ROOT_ID, "h", y_ch, _ry)
+                                _new_ids = tree.add_threshold_pair(_parent_id, "h", y_ch, _ry)
                             else:
                                 _new_ids = []
                             st.session_state.subplot_gates.setdefault((r, c), set()).update(_new_ids)
@@ -1070,10 +1129,14 @@ def subplot_label(r: int, c: int) -> str:
 
     file = cfg.get("file")
     if file:
-        stem = os.path.splitext(file)[0]
-        truncated = stem[:25] + "..." if len(stem) > 25 else stem
-        n_events = len(st.session_state.fcs_data[file]["data"])
-        return f"{truncated} (n = {n_events:,})"
+        _lbl = st.session_state.file_labels.get(file, os.path.basename(file))
+        _gate_id = cfg.get("gate_id")
+        if _gate_id and file in st.session_state.gate_trees and _gate_id in st.session_state.gate_trees[file]._gates:
+            _gtree = st.session_state.gate_trees[file]
+            _gate = _gtree.get_gate(_gate_id)
+            _path = " > ".join([a.name for a in _gtree.get_ancestors(_gate_id)] + [_gate.name])
+            return f"{_lbl} > {_path}"
+        return _lbl
 
     return "Demo (random data)"
 
@@ -1166,7 +1229,8 @@ def gate_name_dialog():
             gate.name = name.strip() or "Gate"
             gate.color = chosen_color
             if file and file in st.session_state.gate_trees:
-                _gid = st.session_state.gate_trees[file].add_gate(gate, GateTree.ROOT_ID)
+                _parent_id = pg.get("parent_id") or GateTree.ROOT_ID
+                _gid = st.session_state.gate_trees[file].add_gate(gate, _parent_id)
                 _src_rc = pg.get("subplot_rc")
                 if _src_rc:
                     st.session_state.subplot_gates.setdefault(_src_rc, set()).add(_gid)
