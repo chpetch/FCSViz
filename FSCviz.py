@@ -1,3 +1,4 @@
+import json
 import os
 import tempfile
 
@@ -5,7 +6,7 @@ import fcsparser
 import numpy as np
 import plotly.graph_objects as go
 import streamlit as st
-from gates import GateTree
+from gates import Gate, GateTree, RECTANGLE, POLYGON, QUADRANT, THRESHOLD_V, THRESHOLD_H
 
 st.set_page_config(page_title="FSCViz", layout="wide")
 st.title("FSCViz")
@@ -52,6 +53,19 @@ def apply_transform(arr: np.ndarray, transform: str, cofactor: float = 150) -> n
     return arr  # Linear
 
 
+def _inverse_transform(val: float, transform: str, cofactor: float = 150) -> float:
+    """Invert apply_transform — convert display-space value back to raw data space."""
+    if transform == "Log":
+        return 10.0 ** val
+    if transform == "Ln":
+        return float(np.exp(val))
+    if transform == "asinh":
+        return float(np.sinh(val) * cofactor)
+    if transform == "biex":
+        return float(np.sign(val) * cofactor * (10.0 ** abs(val) - 1.0))
+    return val  # Linear passthrough
+
+
 def _axis_label(channel: str, transform: str) -> str:
     return channel if transform == "Linear" else f"{channel} ({transform})"
 
@@ -74,6 +88,45 @@ def _demo_data(rng: np.random.Generator, n: int = N_CELLS) -> tuple:
     return x, y
 
 
+# --- Gate drawing helpers ---
+
+def _cancel_drawing():
+    st.session_state.active_gate_tool = None
+    st.session_state.drawing_subplot = None
+    st.session_state.gate_vertices = []
+    st.session_state.processed_selection = {}
+    st.session_state.hover_pt = {}
+
+
+def _is_drawable_subplot(r, c):
+    cfg = st.session_state.subplot_config.get((r, c), {})
+    if not cfg.get("configured"):
+        return False
+    if cfg.get("plot_type") not in ("Scatter", "Density"):
+        return False
+    if not (cfg.get("x_ch") and cfg.get("y_ch")):
+        return False
+    file = cfg.get("file")
+    return file is None or file in st.session_state.fcs_data
+
+
+def _polygon_to_svg_path(vertices):
+    if len(vertices) < 3:
+        return ""
+    pts = " L ".join(f"{x},{y}" for x, y in vertices)
+    return f"M {pts} Z"
+
+
+def _hex_to_rgba(hex_color, alpha=0.12):
+    h = hex_color.lstrip("#")
+    r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+    return f"rgba({r},{g},{b},{alpha})"
+
+
+def _selection_fingerprint(sel):
+    return json.dumps(sel, sort_keys=True, default=str)
+
+
 # --- Session state init ---
 if "fcs_data" not in st.session_state:
     st.session_state.fcs_data = {}
@@ -87,6 +140,27 @@ if "subplot_config" not in st.session_state:
 
 if "dialog_coords" not in st.session_state:
     st.session_state.dialog_coords = (1, 1)
+
+if "active_gate_tool" not in st.session_state:
+    st.session_state.active_gate_tool = None
+
+if "drawing_subplot" not in st.session_state:
+    st.session_state.drawing_subplot = None
+
+if "pending_gate" not in st.session_state:
+    st.session_state.pending_gate = None
+
+if "processed_selection" not in st.session_state:
+    st.session_state.processed_selection = {}
+
+if "gate_vertices" not in st.session_state:
+    st.session_state.gate_vertices = []   # list of (x, y) tuples for WIP gate
+
+if "subplot_gates" not in st.session_state:
+    st.session_state.subplot_gates = {}     # {(r, c): set of gate_ids drawn on that subplot}
+
+if "hover_pt" not in st.session_state:
+    st.session_state.hover_pt = {}        # {(r, c): (hx, hy)} — current hover position per subplot
 
 st.divider()
 col1, col2 = st.columns([5, 1], vertical_alignment="center")
@@ -113,6 +187,69 @@ st.markdown(
     "</style>",
     unsafe_allow_html=True,
 )
+
+# --- Gate toolbar ---
+_has_fcs = bool(st.session_state.fcs_data)
+_TOOLS = [
+    ("rectangle",   "▭", "Rectangle gate"),
+    ("polygon",     "⬠", "Polygon gate (lasso)"),
+    ("quadrant",    "⊞", "Quadrant gates (4 regions)"),
+    ("threshold_v", "|",  "Vertical threshold"),
+    ("threshold_h", "—",  "Horizontal threshold"),
+]
+_tool_cols = st.columns([1, 1, 1, 1, 1, 4])
+for (_tid, _icon, _tip), _col in zip(_TOOLS, _tool_cols):
+    with _col:
+        _is_active = st.session_state.active_gate_tool == _tid
+        if st.button(
+            _icon, key=f"_tool_{_tid}", help=_tip,
+            disabled=not _has_fcs,
+            type="primary" if _is_active else "secondary",
+            use_container_width=True,
+        ):
+            if _is_active:
+                _cancel_drawing()
+            else:
+                _cancel_drawing()
+                st.session_state.active_gate_tool = _tid
+            st.rerun()
+
+# Drawing instruction shown inline in the toolbar's right column
+with _tool_cols[-1]:
+    _active_tool = st.session_state.active_gate_tool
+    _drawing_rc  = st.session_state.drawing_subplot
+    _verts       = st.session_state.gate_vertices
+    if _active_tool and not _drawing_rc:
+        st.caption(f"**{_active_tool}** selected — click a subplot title to start drawing.")
+    elif _active_tool and _drawing_rc:
+        if _active_tool == "rectangle":
+            st.caption("✏️ Drag on the plot to draw the gate rectangle.")
+        elif _active_tool == "polygon":
+            _n = len(_verts)
+            if _n < 3:
+                st.caption(f"✏️ Click to add vertices ({max(0, 3 - _n)} more needed).")
+            else:
+                if st.button(f"✓ Finish gate ({_n} pts)", type="primary", use_container_width=True):
+                    _cfg_d = st.session_state.subplot_config.get(_drawing_rc, {})
+                    _x_tr = _cfg_d.get("x_transform", "Linear"); _x_cof = _cfg_d.get("x_cofactor", 150)
+                    _y_tr = _cfg_d.get("y_transform", "Linear"); _y_cof = _cfg_d.get("y_cofactor", 150)
+                    _raw_verts = [
+                        (_inverse_transform(v[0], _x_tr, _x_cof),
+                         _inverse_transform(v[1], _y_tr, _y_cof))
+                        for v in _verts
+                    ]
+                    _g = Gate(
+                        name="Gate", gate_type=POLYGON,
+                        x_channel=_cfg_d.get("x_ch") or "X",
+                        y_channel=_cfg_d.get("y_ch") or "Y",
+                        params={"vertices": _raw_verts},
+                    )
+                    st.session_state.pending_gate = {"gate_obj": _g, "file": _cfg_d.get("file"), "subplot_rc": _drawing_rc}
+                    st.session_state.gate_vertices = []
+                    st.session_state.drawing_subplot = None
+                    st.rerun()
+        elif _active_tool in ("quadrant", "threshold_v", "threshold_h"):
+            st.caption("✏️ Click anywhere on the plot to place the gate.")
 
 # --- Sidebar ---
 with st.sidebar:
@@ -155,12 +292,51 @@ with st.sidebar:
             col_label, col_btn = st.columns([4, 1])
             col_label.caption(f"{name}  \n{n_events:,} events · {n_ch} ch")
             if col_btn.button("×", key=f"_rm_{name}", help=f"Remove {name}"):
+                _rm_tree = st.session_state.gate_trees.pop(name, None)
+                if _rm_tree:
+                    _rm_ids = set(_rm_tree._gates.keys())
+                    for _sg in st.session_state.get("subplot_gates", {}).values():
+                        _sg -= _rm_ids
                 del st.session_state.fcs_data[name]
-                st.session_state.gate_trees.pop(name, None)
                 for cfg in st.session_state.subplot_config.values():
                     if cfg.get("file") == name:
                         cfg.update({"configured": False, "file": None, "x_ch": None, "y_ch": None})
                 st.rerun()
+
+    # Gate tree panel — shown when any loaded file has gates
+    _any_gates = any(len(t) > 0 for t in st.session_state.gate_trees.values())
+    if st.session_state.fcs_data and _any_gates:
+        st.divider()
+        st.write("**Gates**")
+        for _fname, _tree in st.session_state.gate_trees.items():
+            if _fname not in st.session_state.fcs_data or len(_tree) == 0:
+                continue
+            _fdata = st.session_state.fcs_data[_fname]["data"]
+            _flat = _tree.flat_list()
+            st.caption(os.path.splitext(os.path.basename(_fname))[0])
+            for _depth, _gate in _flat:
+                _n = _tree.event_count(_gate.id, _fdata)
+                _pct = _tree.percent_of_parent(_gate.id, _fdata)
+                _col_info, _col_del = st.columns([5, 1])
+                with _col_info:
+                    _pad = _depth * 16
+                    st.markdown(
+                        f'<div style="margin-left:{_pad}px;line-height:1.3">'
+                        f'<span style="color:{_gate.color};font-weight:600">{_gate.name}</span>'
+                        f'<br><span style="font-size:0.72rem;color:#888">'
+                        f'{_n:,} · {_pct:.1f}%</span></div>',
+                        unsafe_allow_html=True,
+                    )
+                with _col_del:
+                    if st.button("×", key=f"_del_gate_{_gate.id}",
+                                 help=f"Delete {_gate.name}"):
+                        _tree.remove_gate(_gate.id)
+                        for _cfg in st.session_state.subplot_config.values():
+                            if _cfg.get("gate_id") == _gate.id:
+                                _cfg["gate_id"] = None
+                        for _sg in st.session_state.get("subplot_gates", {}).values():
+                            _sg.discard(_gate.id)
+                        st.rerun()
 
 rows, cols = LAYOUTS[layout_choice]
 
@@ -312,18 +488,27 @@ def plot_dialog(r: int, c: int):
     btn1, btn2 = st.columns(2)
     with btn1:
         if st.button("Apply", use_container_width=True, type="primary"):
+            # For demo (no file) scatter/density plots, assign synthetic channel names
+            # so the subplot is eligible for gate drawing without needing a real file.
+            if not selected_file and plot_type in ("Scatter", "Density"):
+                eff_x_ch = "X"
+                eff_y_ch = "Y"
+            else:
+                eff_x_ch = x_ch
+                eff_y_ch = y_ch if plot_type in ("Scatter", "Density") else None
             st.session_state.subplot_config[(r, c)] = {
                 "configured": True,
                 "file": selected_file,
                 "plot_type": plot_type,
-                "x_ch": x_ch,
-                "y_ch": y_ch if plot_type in ("Scatter", "Density") else None,
+                "x_ch": eff_x_ch,
+                "y_ch": eff_y_ch,
                 "n_bins": n_bins,
                 "color": final_color,
                 "x_transform": x_transform,
                 "y_transform": y_transform,
                 "x_cofactor": x_cofactor,
                 "y_cofactor": y_cofactor,
+                "gate_id": st.session_state.subplot_config[(r, c)].get("gate_id"),
             }
             if not selected_file:
                 st.session_state.seeds[(r, c)] = np.random.randint(0, 100_000)
@@ -487,7 +672,220 @@ def make_plot_fig(r: int, c: int) -> go.Figure:
             yaxis_title=y_label if has_scatter_data else None,
         )
 
+    # Gate overlays — gates stored in raw data space; re-apply subplot transform for display
+    if plot_type in ("Scatter", "Density"):
+        _gtrees = st.session_state.get("gate_trees", {})
+        if file and file in _gtrees:
+            _x_cof = cfg.get("x_cofactor", 150)
+            _y_cof = cfg.get("y_cofactor", 150)
+            def _tx(v):  # raw → plot x
+                return float(apply_transform(np.array([v]), x_transform, _x_cof)[0])
+            def _ty(v):  # raw → plot y
+                return float(apply_transform(np.array([v]), y_transform, _y_cof)[0])
+
+            _subplot_gate_ids = st.session_state.get("subplot_gates", {}).get((r, c), set())
+            for _dep, _g in _gtrees[file].flat_list():
+                # Only draw gates that were drawn on this specific subplot
+                if _g.id not in _subplot_gate_ids:
+                    continue
+                # Only draw if this subplot is showing the gate's channels
+                _x_ok = (_g.x_channel == x_ch)
+                _y_ok = (_g.y_channel == y_ch)
+                if _g.gate_type in (RECTANGLE, POLYGON, QUADRANT) and not (_x_ok and _y_ok):
+                    continue
+                if _g.gate_type == THRESHOLD_V and not _x_ok:
+                    continue
+                if _g.gate_type == THRESHOLD_H and not _y_ok:
+                    continue
+
+                _c = _g.color; _fill = _hex_to_rgba(_c, 0.10); _p = _g.params
+                if _g.gate_type == RECTANGLE:
+                    fig.add_shape(type="rect",
+                        x0=_tx(_p["x_min"]), x1=_tx(_p["x_max"]),
+                        y0=_ty(_p["y_min"]), y1=_ty(_p["y_max"]),
+                        line=dict(color=_c, width=2), fillcolor=_fill)
+                elif _g.gate_type == POLYGON:
+                    _tv = [(_tx(vx), _ty(vy)) for vx, vy in _p["vertices"]]
+                    fig.add_shape(type="path",
+                        path=_polygon_to_svg_path(_tv),
+                        line=dict(color=_c, width=2), fillcolor=_fill)
+                elif _g.gate_type == QUADRANT and _p.get("quadrant") == "Q1":
+                    fig.add_vline(x=_tx(_p["x0"]), line_color=_c, line_dash="dash", line_width=1.5)
+                    fig.add_hline(y=_ty(_p["y0"]), line_color=_c, line_dash="dash", line_width=1.5)
+                elif _g.gate_type == THRESHOLD_V:
+                    fig.add_vline(x=_tx(_p["x0"]), line_color=_c, line_dash="dash", line_width=1.5)
+                elif _g.gate_type == THRESHOLD_H:
+                    fig.add_hline(y=_ty(_p["y0"]), line_color=_c, line_dash="dash", line_width=1.5)
+
     return fig
+
+
+# --- Gate drawing ---
+
+# Modebar buttons to remove in drawing mode so zoom/pan don't intercept drags.
+_DRAW_MODEBAR_REMOVE = ["zoom", "pan", "zoomin", "zoomout", "autoscale", "resetscale"]
+
+
+def _extract_sel_list(event, attr):
+    """Return a selection attribute as a list, handling dict and dataclass event forms."""
+    if event is None:
+        return []
+    sel = getattr(event, "selection", None)
+    if sel is None:
+        return []
+    val = sel.get(attr, []) if isinstance(sel, dict) else (getattr(sel, attr, None) or [])
+    return val if isinstance(val, list) else [val]
+
+
+def _xy_from_point(pt):
+    """Extract (x, y) scalars from a selected point (dict or dataclass)."""
+    if isinstance(pt, dict):
+        return pt.get("x"), pt.get("y")
+    return getattr(pt, "x", None), getattr(pt, "y", None)
+
+
+def _extract_hover_list(event):
+    """Return hovered points from on_hover event."""
+    if event is None:
+        return []
+    hover = getattr(event, "hover", None)
+    if hover is None:
+        return []
+    pts = hover.get("points", []) if isinstance(hover, dict) else getattr(hover, "points", None)
+    return list(pts) if pts else []
+
+
+def _render_drawing_chart(r, c, tool):
+    """Render a subplot in drawing mode. Rectangle uses drag-box; others use click."""
+    cfg = st.session_state.subplot_config[(r, c)]
+    fig = make_plot_fig(r, c)
+
+    # Invisible SVG grid — go.Scatter (SVG) keeps DOM elements at opacity=0 so
+    # pointer events (click-selection, hover) still fire anywhere on the plot.
+    if fig.data:
+        _first = fig.data[0]
+        _xs = np.array(_first.x, dtype=float)
+        _ys = np.array(_first.y, dtype=float)
+        _ok = np.isfinite(_xs) & np.isfinite(_ys)
+        if _ok.any():
+            _xr, _yr = _xs[_ok], _ys[_ok]
+            _xpad = (_xr.max() - _xr.min()) * 0.05 or 1.0
+            _ypad = (_yr.max() - _yr.min()) * 0.05 or 1.0
+            _gx = np.linspace(_xr.min() - _xpad, _xr.max() + _xpad, 50)
+            _gy = np.linspace(_yr.min() - _ypad, _yr.max() + _ypad, 50)
+            _gx_m, _gy_m = np.meshgrid(_gx, _gy)
+            fig.add_trace(go.Scatter(
+                x=_gx_m.ravel(), y=_gy_m.ravel(),
+                mode="markers",
+                marker=dict(size=14, opacity=0),
+                showlegend=False,
+                hoverinfo="none",
+            ))
+
+    if tool == "rectangle":
+        # Drag-to-draw: set dragmode='select' so Plotly renders the selection box
+        # live on the client during the drag — that IS the shape preview.
+        # On mouse-up the box coordinates come back via event.selection.box.
+        fig.update_layout(
+            dragmode="select",
+            modebar={"remove": _DRAW_MODEBAR_REMOVE},
+        )
+        event = st.plotly_chart(
+            fig, use_container_width=True, key=f"chart_{r}_{c}_draw",
+            on_select="rerun", selection_mode="box",
+        )
+        box = _extract_sel_list(event, "box")
+        if box:
+            bx = box[0]
+            xr = bx.get("x") if isinstance(bx, dict) else getattr(bx, "x", None)
+            yr = bx.get("y") if isinstance(bx, dict) else getattr(bx, "y", None)
+            if xr and yr and len(xr) >= 2 and len(yr) >= 2:
+                x_min, x_max = float(min(xr)), float(max(xr))
+                y_min, y_max = float(min(yr)), float(max(yr))
+                if x_max > x_min and y_max > y_min:   # ignore accidental zero-area clicks
+                    _x_tr = cfg.get("x_transform", "Linear"); _x_cof = cfg.get("x_cofactor", 150)
+                    _y_tr = cfg.get("y_transform", "Linear"); _y_cof = cfg.get("y_cofactor", 150)
+                    gate = Gate(
+                        name="Gate", gate_type=RECTANGLE,
+                        x_channel=cfg.get("x_ch") or "X",
+                        y_channel=cfg.get("y_ch") or "Y",
+                        params={
+                            "x_min": _inverse_transform(x_min, _x_tr, _x_cof),
+                            "x_max": _inverse_transform(x_max, _x_tr, _x_cof),
+                            "y_min": _inverse_transform(y_min, _y_tr, _y_cof),
+                            "y_max": _inverse_transform(y_max, _y_tr, _y_cof),
+                        },
+                    )
+                    st.session_state.pending_gate = {"gate_obj": gate, "file": cfg.get("file"), "subplot_rc": (r, c)}
+                    st.session_state.drawing_subplot = None
+                    st.rerun()
+
+    else:
+        # Click-based for polygon / quadrant / threshold
+        verts = list(st.session_state.gate_vertices)
+
+        # Confirmed polygon vertex preview
+        if verts and tool == "polygon":
+            vx = [v[0] for v in verts]
+            vy = [v[1] for v in verts]
+            close_x = vx + [vx[0]] if len(verts) >= 2 else vx
+            close_y = vy + [vy[0]] if len(verts) >= 2 else vy
+            fig.add_trace(go.Scatter(
+                x=close_x, y=close_y, mode="lines+markers",
+                line=dict(color="#e74c3c", dash="dot", width=2),
+                marker=dict(color="#e74c3c", size=8),
+                showlegend=False, hoverinfo="skip",
+            ))
+
+        # Key encodes len(verts) — forces fresh Plotly instance after each vertex
+        # so the next click is always a fresh selection (no deselect-first needed)
+        draw_key = f"chart_{r}_{c}_draw_{len(verts)}"
+        fig.update_layout(
+            clickmode="event+select",
+            modebar={"remove": _DRAW_MODEBAR_REMOVE},
+        )
+        event = st.plotly_chart(
+            fig, use_container_width=True, key=draw_key,
+            on_select="rerun", selection_mode="points",
+        )
+
+        pts = _extract_sel_list(event, "points")
+        if pts:
+            x, y = _xy_from_point(pts[-1])
+            if x is not None and y is not None:
+                fp = _selection_fingerprint(f"{x},{y}")
+                if st.session_state.processed_selection.get("last") != fp:
+                    st.session_state.processed_selection["last"] = fp
+
+                    if tool == "polygon":
+                        new_verts = verts + [(float(x), float(y))]
+                        st.session_state.gate_vertices = new_verts
+                        st.session_state.processed_selection = {}
+                        st.rerun()
+
+                    else:
+                        # Quadrant / threshold — one click, direct tree mutation
+                        file = cfg.get("file")
+                        x_ch = cfg.get("x_ch") or "X"
+                        y_ch = cfg.get("y_ch") or "Y"
+                        _x_tr = cfg.get("x_transform", "Linear"); _x_cof = cfg.get("x_cofactor", 150)
+                        _y_tr = cfg.get("y_transform", "Linear"); _y_cof = cfg.get("y_cofactor", 150)
+                        _rx = _inverse_transform(float(x), _x_tr, _x_cof)
+                        _ry = _inverse_transform(float(y), _y_tr, _y_cof)
+                        if file and file in st.session_state.gate_trees:
+                            tree = st.session_state.gate_trees[file]
+                            if tool == "quadrant":
+                                _new_ids = tree.add_quadrant_gates(GateTree.ROOT_ID, x_ch, y_ch, _rx, _ry)
+                            elif tool == "threshold_v":
+                                _new_ids = tree.add_threshold_pair(GateTree.ROOT_ID, "v", x_ch, _rx)
+                            elif tool == "threshold_h":
+                                _new_ids = tree.add_threshold_pair(GateTree.ROOT_ID, "h", y_ch, _ry)
+                            else:
+                                _new_ids = []
+                            st.session_state.subplot_gates.setdefault((r, c), set()).update(_new_ids)
+                        _cancel_drawing()
+                        st.rerun()
+
 
 
 # --- Export helpers ---
@@ -685,6 +1083,8 @@ def _set_dialog_coords(r: int, c: int):
 
 
 # --- Grid ---
+_active_tool = st.session_state.active_gate_tool
+_drawing_rc = st.session_state.drawing_subplot
 clicked_subplot = None
 
 for r in range(1, rows + 1):
@@ -692,23 +1092,94 @@ for r in range(1, rows + 1):
     for c_idx, col_widget in enumerate(grid_cols):
         c = c_idx + 1
         with col_widget:
-            if st.button(
-                subplot_label(r, c),
-                key=f"title_{r}_{c}",
-                use_container_width=True,
-                type="tertiary",
-                on_click=_set_dialog_coords,
-                args=(r, c),
-            ):
-                clicked_subplot = (r, c)
-            st.plotly_chart(
-                make_plot_fig(r, c),
-                use_container_width=True,
-                key=f"chart_{r}_{c}",
-            )
+            is_drawing = _drawing_rc == (r, c)
+            can_draw = bool(_active_tool) and _is_drawable_subplot(r, c)
+
+            if is_drawing:
+                # Cancel button replaces title while drawing
+                if st.button(
+                    f"✕ Cancel | {subplot_label(r, c)}",
+                    key=f"title_{r}_{c}",
+                    use_container_width=True,
+                    type="primary",
+                ):
+                    _cancel_drawing()
+                    st.rerun()
+            elif can_draw:
+                # Tool active: clicking enters drawing mode
+                if st.button(
+                    f"[{_active_tool}] {subplot_label(r, c)}",
+                    key=f"title_{r}_{c}",
+                    use_container_width=True,
+                    type="secondary",
+                ):
+                    st.session_state.drawing_subplot = (r, c)
+                    st.rerun()
+            else:
+                # Normal: open configure dialog
+                if st.button(
+                    subplot_label(r, c),
+                    key=f"title_{r}_{c}",
+                    use_container_width=True,
+                    type="tertiary",
+                    on_click=_set_dialog_coords,
+                    args=(r, c),
+                ):
+                    clicked_subplot = (r, c)
+
+            if is_drawing:
+                _render_drawing_chart(r, c, _active_tool)
+            else:
+                st.plotly_chart(
+                    make_plot_fig(r, c),
+                    use_container_width=True,
+                    key=f"chart_{r}_{c}",
+                )
 
 if clicked_subplot:
     plot_dialog(*clicked_subplot)
+
+@st.dialog("Name this gate")
+def gate_name_dialog():
+    pg = st.session_state.pending_gate
+    gate = pg["gate_obj"]
+    file = pg["file"]
+
+    name = st.text_input("Gate name", value="Gate")
+
+    saved_preset = "Red"
+    preset_options = list(PRESET_COLORS.keys()) + ["Custom"]
+    color_choice = st.radio(
+        "Color", preset_options,
+        index=preset_options.index(saved_preset),
+        horizontal=True,
+        key="_gname_color_radio",
+    )
+    if color_choice == "Custom":
+        chosen_color = st.color_picker("Color", value="#e74c3c", label_visibility="collapsed")
+    else:
+        chosen_color = PRESET_COLORS[color_choice]
+
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("Save gate", type="primary", use_container_width=True):
+            gate.name = name.strip() or "Gate"
+            gate.color = chosen_color
+            if file and file in st.session_state.gate_trees:
+                _gid = st.session_state.gate_trees[file].add_gate(gate, GateTree.ROOT_ID)
+                _src_rc = pg.get("subplot_rc")
+                if _src_rc:
+                    st.session_state.subplot_gates.setdefault(_src_rc, set()).add(_gid)
+            st.session_state.pending_gate = None
+            st.rerun()
+    with col2:
+        if st.button("Cancel", use_container_width=True):
+            st.session_state.pending_gate = None
+            st.rerun()
+
+
+if st.session_state.pending_gate:
+    gate_name_dialog()
 
 # --- Export ---
 st.divider()
