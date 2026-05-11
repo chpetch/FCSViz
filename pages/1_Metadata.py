@@ -1,7 +1,7 @@
 import pandas as pd
 import streamlit as st
 
-st.set_page_config(page_title="FSCViz – Metadata", layout="wide")
+st.set_page_config(page_title="FCSViz – Metadata", layout="wide")
 st.title("FCS File Metadata")
 
 fcs_data = st.session_state.get("fcs_data", {})

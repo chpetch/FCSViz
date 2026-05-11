@@ -228,3 +228,7 @@ CLAUDE.md
 
 # Local-only test suite (not shipped with the app)
 tests/
+
+# Generated/local image assets (icons, banners)
+*.png
+*.PNG

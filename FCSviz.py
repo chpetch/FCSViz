@@ -8,8 +8,8 @@ import plotly.graph_objects as go
 import streamlit as st
 from gates import Gate, GateTree, RECTANGLE, POLYGON, QUADRANT, THRESHOLD_V, THRESHOLD_H
 
-st.set_page_config(page_title="FSCViz", layout="wide")
-st.title("FSCViz")
+st.set_page_config(page_title="FCSViz", layout="wide")
+st.title("FCSViz")
 
 with st.expander("How to use", expanded=False):
     st.markdown(
@@ -325,25 +325,26 @@ with st.sidebar:
     _any_gates = any(len(t) > 0 for t in st.session_state.gate_trees.values())
     if st.session_state.fcs_data and _any_gates:
         st.divider()
-        st.write("**Gate stats**")
+        st.write("**Gates**")
+        st.markdown("""<style>
+section[data-testid="stSidebar"] [data-testid="stHorizontalBlock"]{margin-bottom:-0.7rem}
+section[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p{margin:0;line-height:1.3}
+section[data-testid="stSidebar"] button[kind="secondary"]{
+    padding:0.05rem 0.3rem!important;min-height:unset!important;
+    height:1.4rem!important;line-height:1!important}
+</style>""", unsafe_allow_html=True)
         for _fname, _tree in st.session_state.gate_trees.items():
             if _fname not in st.session_state.fcs_data or len(_tree) == 0:
                 continue
-            _fdata = st.session_state.fcs_data[_fname]["data"]
             _flat = _tree.flat_list()
             st.caption(st.session_state.file_labels.get(_fname, os.path.basename(_fname)))
             for _depth, _gate in _flat:
-                _n = _tree.event_count(_gate.id, _fdata)
-                _pct = _tree.percent_of_parent(_gate.id, _fdata)
                 _prefix = ("&nbsp;&nbsp;" * (_depth - 1) + "└─&nbsp;") if _depth > 0 else ""
                 _rcols = st.columns([9, 1])
                 with _rcols[0]:
                     st.markdown(
-                        f'<div style="display:flex;align-items:center;gap:6px;line-height:1.4">'
                         f'<span style="color:{_gate.color};font-weight:600;font-size:0.85rem">'
-                        f'{_prefix}{_gate.name}</span>'
-                        f'<span style="font-size:0.78rem;color:#666;white-space:nowrap">'
-                        f'{_fmt_n(_n)} · {_pct:.1f}%</span></div>',
+                        f'{_prefix}{_gate.name}</span>',
                         unsafe_allow_html=True,
                     )
                 with _rcols[1]:
@@ -1245,39 +1246,94 @@ def gate_name_dialog():
 if st.session_state.pending_gate:
     gate_name_dialog()
 
-# --- Export ---
-st.divider()
-st.subheader("Export")
+# --- Gate statistics table ---
+def _build_gate_table_rows():
+    rows = []
+    for fname, tree in st.session_state.gate_trees.items():
+        if fname not in st.session_state.fcs_data or len(tree) == 0:
+            continue
+        lbl = st.session_state.file_labels.get(fname, os.path.basename(fname))
+        fdata = st.session_state.fcs_data[fname]["data"]
+        total = len(fdata)
+        for _, gate in tree.flat_list():
+            ancestors = tree.get_ancestors(gate.id)
+            path = [lbl] + [a.name for a in ancestors] + [gate.name]
+            n = tree.event_count(gate.id, fdata)
+            pct_p = tree.percent_of_parent(gate.id, fdata)
+            pct_t = n / total * 100 if total > 0 else 0.0
+            rows.append({
+                "path": path,
+                "gate": gate.name,
+                "n": n,
+                "pct_parent": round(pct_p, 1),
+                "pct_total": round(pct_t, 1),
+            })
+    return rows
 
-exp_col1, exp_col2, exp_col3 = st.columns([2, 2, 2])
+_gate_rows = _build_gate_table_rows()
+if _gate_rows:
+    st.divider()
+    st.subheader("Gate statistics")
+    try:
+        import pandas as pd
+        from st_aggrid import AgGrid, GridOptionsBuilder, JsCode
 
-with exp_col1:
-    if st.button("Export PNG", type="primary", use_container_width=True):
-        with st.spinner("Rendering subplots…"):
-            try:
-                st.session_state._export_data = _export_png(rows, cols)
-                st.session_state._export_fmt = "png"
-                st.session_state._export_mime = "image/png"
-                st.session_state._export_ready = True
-            except Exception as e:
-                st.error(f"PNG export failed: {e}")
+        _df_gates = pd.DataFrame(_gate_rows)
+        _gb = GridOptionsBuilder.from_dataframe(_df_gates.drop(columns=["path"]))
+        _gb.configure_column("gate", hide=True)
+        _gb.configure_column("n", header_name="Count", type=["numericColumn"],
+                              valueFormatter=JsCode("function(p){return p.value==null?'':p.value.toLocaleString();}"))
+        _gb.configure_column("pct_parent", header_name="% of parent", type=["numericColumn"],
+                              valueFormatter=JsCode("function(p){return p.value==null?'':p.value.toFixed(1)+'%';}"))
+        _gb.configure_column("pct_total", header_name="% of total", type=["numericColumn"],
+                              valueFormatter=JsCode("function(p){return p.value==null?'':p.value.toFixed(1)+'%';}"))
+        _go = _gb.build()
+        _go["treeData"] = True
+        _go["animateRows"] = True
+        _go["getDataPath"] = JsCode("function(data){return data.path;}")
+        _go["autoGroupColumnDef"] = {
+            "headerName": "Gate",
+            "minWidth": 200,
+            "cellRendererParams": {"suppressCount": True},
+        }
+        AgGrid(_df_gates, gridOptions=_go, height=300,
+               fit_columns_on_grid_load=True, allow_unsafe_jscode=True)
+    except Exception as _e:
+        st.caption(f"Gate stats table unavailable: {_e}")
 
-with exp_col2:
-    if st.button("Export PDF", type="primary", use_container_width=True):
-        with st.spinner("Rendering subplots…"):
-            try:
-                st.session_state._export_data = _export_pdf(rows, cols)
-                st.session_state._export_fmt = "pdf"
-                st.session_state._export_mime = "application/pdf"
-                st.session_state._export_ready = True
-            except Exception as e:
-                st.error(f"PDF export failed: {e}")
-
-if st.session_state.get("_export_ready"):
-    with exp_col3:
+# Export lives in a second sidebar block so _export_png/_export_pdf are already defined
+with st.sidebar:
+    st.divider()
+    st.write("**Export**")
+    _ex1, _ex2 = st.columns(2)
+    with _ex1:
+        if st.button("PNG", type="primary", use_container_width=True):
+            _er, _ec = LAYOUTS[layout_choice]
+            with st.spinner("Rendering…"):
+                try:
+                    st.session_state._export_data = _export_png(_er, _ec)
+                    st.session_state._export_fmt = "png"
+                    st.session_state._export_mime = "image/png"
+                    st.session_state._export_ready = True
+                except Exception as _ex:
+                    st.error(f"PNG failed: {_ex}")
+    with _ex2:
+        if st.button("PDF", type="primary", use_container_width=True):
+            _er, _ec = LAYOUTS[layout_choice]
+            with st.spinner("Rendering…"):
+                try:
+                    st.session_state._export_data = _export_pdf(_er, _ec)
+                    st.session_state._export_fmt = "pdf"
+                    st.session_state._export_mime = "application/pdf"
+                    st.session_state._export_ready = True
+                except Exception as _ex:
+                    st.error(f"PDF failed: {_ex}")
+    if st.session_state.get("_export_ready"):
         st.download_button(
             label=f"Download {st.session_state._export_fmt.upper()}",
             data=st.session_state._export_data,
             file_name=f"fscviz_export.{st.session_state._export_fmt}",
             mime=st.session_state._export_mime,
+            use_container_width=True,
         )
+

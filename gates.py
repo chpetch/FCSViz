@@ -1,5 +1,5 @@
 """
-Gate data model for FSCViz.
+Gate data model for FCSViz.
 
 No Streamlit dependency — pure data model safe to import anywhere.
 """
