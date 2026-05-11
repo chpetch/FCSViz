@@ -4,12 +4,13 @@ import tempfile
 
 import fcsparser
 import numpy as np
+import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
-from gates import Gate, GateTree, RECTANGLE, POLYGON, QUADRANT, THRESHOLD_V, THRESHOLD_H
+from gates import Gate, GateTree, RECTANGLE, POLYGON, QUADRANT, THRESHOLD_V, THRESHOLD_H, XRANGE, YRANGE
 
 st.set_page_config(page_title="FCSViz", layout="wide")
-st.title("FCSViz")
+st.image("FCSViz-banner-web.jpg", use_container_width=True)
 
 with st.expander("How to use", expanded=False):
     st.markdown(
@@ -28,6 +29,7 @@ LAYOUTS = {
 
 N_CELLS = 5_000
 _NO_FILE = "— random data —"
+_DEMO_KEY = "__demo__"   # internal key for the shared demo dataset
 
 PRESET_COLORS = {
     "Blue":   "#1f77b4",
@@ -98,16 +100,23 @@ def _cancel_drawing():
     st.session_state.hover_pt = {}
 
 
-def _is_drawable_subplot(r, c):
+_HISTOGRAM_TOOLS = {"threshold_v", "xrange"}
+
+def _is_drawable_subplot(r, c, tool=None):
     cfg = st.session_state.subplot_config.get((r, c), {})
     if not cfg.get("configured"):
         return False
-    if cfg.get("plot_type") not in ("Scatter", "Density"):
-        return False
-    if not (cfg.get("x_ch") and cfg.get("y_ch")):
-        return False
+    plot_type = cfg.get("plot_type")
     file = cfg.get("file")
-    return file is None or file in st.session_state.fcs_data
+    is_demo = file is None
+    ok_file = _DEMO_KEY in st.session_state.fcs_data if is_demo else file in st.session_state.fcs_data
+    x_ch = cfg.get("x_ch") or ("X" if is_demo else None)
+    y_ch = cfg.get("y_ch") or ("Y" if is_demo else None)
+    if plot_type == "Histogram":
+        return tool in _HISTOGRAM_TOOLS and bool(x_ch) and ok_file
+    if plot_type not in ("Scatter", "Density"):
+        return False
+    return bool(x_ch) and bool(y_ch) and ok_file
 
 
 def _polygon_to_svg_path(vertices):
@@ -141,9 +150,21 @@ def _selection_fingerprint(sel):
 if "fcs_data" not in st.session_state:
     st.session_state.fcs_data = {}
 
+# Shared demo dataset — generated once, used for gate drawing/stats on demo subplots
+if _DEMO_KEY not in st.session_state.get("fcs_data", {}):
+    _drng = np.random.default_rng(seed=42)
+    _dx, _dy = _demo_data(_drng)
+    st.session_state.fcs_data[_DEMO_KEY] = {
+        "data": pd.DataFrame({"X": _dx, "Y": _dy}),
+        "channels": ["X", "Y"],
+        "meta": {},
+    }
+
 if "gate_trees" not in st.session_state:
-    # {filename: GateTree} — one tree per loaded file
     st.session_state.gate_trees = {}
+
+if _DEMO_KEY not in st.session_state.get("gate_trees", {}):
+    st.session_state.gate_trees[_DEMO_KEY] = GateTree()
 
 if "subplot_config" not in st.session_state:
     st.session_state.subplot_config = {}
@@ -168,6 +189,9 @@ if "gate_vertices" not in st.session_state:
 
 if "subplot_gates" not in st.session_state:
     st.session_state.subplot_gates = {}     # {(r, c): set of gate_ids drawn on that subplot}
+
+if "gate_groups" not in st.session_state:
+    st.session_state.gate_groups = {}       # {gate_id: set[gate_id]} — sibling group membership
 
 if "hover_pt" not in st.session_state:
     st.session_state.hover_pt = {}        # {(r, c): (hx, hy)} — current hover position per subplot
@@ -204,19 +228,28 @@ st.markdown(
 # --- Gate toolbar ---
 _has_fcs = bool(st.session_state.fcs_data)
 _TOOLS = [
-    ("rectangle",   "▭", "Rectangle gate"),
-    ("polygon",     "⬠", "Polygon gate (lasso)"),
-    ("quadrant",    "⊞", "Quadrant gates (4 regions)"),
-    ("threshold_v", "|",  "Vertical threshold"),
-    ("threshold_h", "—",  "Horizontal threshold"),
+    ("rectangle",   "▭",  "Rectangle gate"),
+    ("polygon",     "⬠",  "Polygon gate (lasso)"),
+    ("quadrant",    "⊞",  "Quadrant gates (4 regions)"),
+    ("threshold_v", "|",   "Vertical threshold"),
+    ("threshold_h", "—",   "Horizontal threshold"),
+    ("xrange",      "↔",   "X-range gate [xmin, xmax]"),
+    ("yrange",      "↕",   "Y-range gate [ymin, ymax]"),
 ]
-_tool_cols = st.columns([1, 1, 1, 1, 1, 4])
+_tool_cols = st.columns([1, 1, 1, 1, 1, 1, 1, 4])
+_drawing_plot_type = (
+    st.session_state.subplot_config.get(st.session_state.drawing_subplot, {}).get("plot_type")
+    if st.session_state.drawing_subplot else None
+)
 for (_tid, _icon, _tip), _col in zip(_TOOLS, _tool_cols):
     with _col:
         _is_active = st.session_state.active_gate_tool == _tid
+        _tool_disabled = not _has_fcs or (
+            _drawing_plot_type == "Histogram" and _tid not in _HISTOGRAM_TOOLS
+        )
         if st.button(
             _icon, key=f"_tool_{_tid}", help=_tip,
-            disabled=not _has_fcs,
+            disabled=_tool_disabled,
             type="primary" if _is_active else "secondary",
             use_container_width=True,
         ):
@@ -261,6 +294,8 @@ with _tool_cols[-1]:
                     st.session_state.gate_vertices = []
                     st.session_state.drawing_subplot = None
                     st.rerun()
+        elif _active_tool in ("xrange", "yrange"):
+            st.caption("✏️ Drag on the plot to define the range.")
         elif _active_tool in ("quadrant", "threshold_v", "threshold_h"):
             st.caption("✏️ Click anywhere on the plot to place the gate.")
 
@@ -299,9 +334,10 @@ with st.sidebar:
                 st.error(f"Failed to parse {uf.name}: {e}")
 
     # Show loaded files with explicit remove buttons
-    if st.session_state.fcs_data:
+    _real_files = [k for k in st.session_state.fcs_data if k != _DEMO_KEY]
+    if _real_files:
         st.write("**Loaded files:**")
-        for name in list(st.session_state.fcs_data):
+        for name in _real_files:
             info = st.session_state.fcs_data[name]
             n_events = len(info["data"])
             n_ch = len(info["channels"])
@@ -314,6 +350,8 @@ with st.sidebar:
                     _rm_ids = set(_rm_tree._gates.keys())
                     for _sg in st.session_state.get("subplot_gates", {}).values():
                         _sg -= _rm_ids
+                    for _gid in _rm_ids:
+                        st.session_state.gate_groups.pop(_gid, None)
                 del st.session_state.fcs_data[name]
                 st.session_state.file_labels.pop(name, None)
                 for cfg in st.session_state.subplot_config.values():
@@ -337,7 +375,8 @@ section[data-testid="stSidebar"] button[kind="secondary"]{
             if _fname not in st.session_state.fcs_data or len(_tree) == 0:
                 continue
             _flat = _tree.flat_list()
-            st.caption(st.session_state.file_labels.get(_fname, os.path.basename(_fname)))
+            _flbl = "Demo" if _fname == _DEMO_KEY else st.session_state.file_labels.get(_fname, os.path.basename(_fname))
+            st.caption(_flbl)
             for _depth, _gate in _flat:
                 _prefix = ("&nbsp;&nbsp;" * (_depth - 1) + "└─&nbsp;") if _depth > 0 else ""
                 _rcols = st.columns([9, 1])
@@ -350,12 +389,16 @@ section[data-testid="stSidebar"] button[kind="secondary"]{
                 with _rcols[1]:
                     if st.button("×", key=f"_del_gate_{_gate.id}",
                                  help=f"Delete {_gate.name}"):
-                        _tree.remove_gate(_gate.id)
-                        for _cfg in st.session_state.subplot_config.values():
-                            if _cfg.get("gate_id") == _gate.id:
-                                _cfg["gate_id"] = None
-                        for _sg in st.session_state.get("subplot_gates", {}).values():
-                            _sg.discard(_gate.id)
+                        _group = st.session_state.gate_groups.get(_gate.id)
+                        _del_ids = list(_group) if _group else [_gate.id]
+                        for _gid in _del_ids:
+                            _tree.remove_gate(_gid)
+                            st.session_state.gate_groups.pop(_gid, None)
+                            for _cfg in st.session_state.subplot_config.values():
+                                if _cfg.get("gate_id") == _gid:
+                                    _cfg["gate_id"] = None
+                            for _sg in st.session_state.get("subplot_gates", {}).values():
+                                _sg.discard(_gid)
                         st.rerun()
 
 rows, cols = LAYOUTS[layout_choice]
@@ -575,6 +618,38 @@ def _blank_fig() -> go.Figure:
     return fig
 
 
+@st.cache_data
+def _cached_density(x: np.ndarray, y: np.ndarray) -> np.ndarray:
+    """KDE density per point. Cached by array content — free on repeated reruns."""
+    from scipy.stats import gaussian_kde
+    from scipy.interpolate import RegularGridInterpolator
+    valid = np.isfinite(x) & np.isfinite(y)
+    x_v, y_v = x[valid], y[valid]
+    if len(x_v) < 10:
+        return np.zeros(len(x))
+    try:
+        n_pts = len(x_v)
+        if n_pts > 5000:
+            idx = np.random.default_rng(seed=42).choice(n_pts, size=5000, replace=False)
+            kde = gaussian_kde(np.vstack([x_v[idx], y_v[idx]]))
+        else:
+            kde = gaussian_kde(np.vstack([x_v, y_v]))
+        g = 150
+        xi = np.linspace(x_v.min(), x_v.max(), g)
+        yi = np.linspace(y_v.min(), y_v.max(), g)
+        xi_g, yi_g = np.meshgrid(xi, yi)
+        z = kde(np.vstack([xi_g.ravel(), yi_g.ravel()])).reshape(g, g)
+        interp = RegularGridInterpolator(
+            (xi, yi), z.T, method="linear", bounds_error=False, fill_value=0
+        )
+        return np.where(valid, interp(np.column_stack([
+            np.where(valid, x, x_v[0]),
+            np.where(valid, y, y_v[0]),
+        ])), 0)
+    except Exception:
+        return np.zeros(len(x))
+
+
 def make_plot_fig(r: int, c: int) -> go.Figure:
     cfg = st.session_state.subplot_config.get((r, c), {})
 
@@ -592,10 +667,11 @@ def make_plot_fig(r: int, c: int) -> go.Figure:
     y_transform = cfg.get("y_transform", "Linear")
 
     _gate_id = cfg.get("gate_id")
-    if file and file in fcs_data:
-        _df_all = fcs_data[file]["data"]
-        if _gate_id and file in st.session_state.gate_trees:
-            _gtree = st.session_state.gate_trees[file]
+    _eff_file = file if file is not None else _DEMO_KEY
+    if _eff_file in fcs_data:
+        _df_all = fcs_data[_eff_file]["data"]
+        if _gate_id and _eff_file in st.session_state.gate_trees:
+            _gtree = st.session_state.gate_trees[_eff_file]
             if _gate_id in _gtree._gates:
                 _mask = _gtree.get_mask(_gate_id, _df_all)
                 _file_df = _df_all[_mask].reset_index(drop=True)
@@ -653,33 +729,7 @@ def make_plot_fig(r: int, c: int) -> go.Figure:
             y = apply_transform(y_raw, y_transform)
             x_label, y_label = _axis_label("X", x_transform), _axis_label("Y", y_transform)
 
-        # Drop NaNs before KDE (produced by Log/Ln on non-positive values)
-        valid = np.isfinite(x) & np.isfinite(y)
-        x_v, y_v = x[valid], y[valid]
-
-        try:
-            from scipy.stats import gaussian_kde
-            from scipy.interpolate import RegularGridInterpolator
-            n_pts = len(x_v)
-            if n_pts > 5000:
-                idx = np.random.default_rng(seed=42).choice(n_pts, size=5000, replace=False)
-                kde = gaussian_kde(np.vstack([x_v[idx], y_v[idx]]))
-            else:
-                kde = gaussian_kde(np.vstack([x_v, y_v]))
-            g = 150
-            xi = np.linspace(x_v.min(), x_v.max(), g)
-            yi = np.linspace(y_v.min(), y_v.max(), g)
-            xi_g, yi_g = np.meshgrid(xi, yi)
-            z = kde(np.vstack([xi_g.ravel(), yi_g.ravel()])).reshape(g, g)
-            interp = RegularGridInterpolator(
-                (xi, yi), z.T, method="linear", bounds_error=False, fill_value=0
-            )
-            density = np.where(valid, interp(np.column_stack([
-                np.where(valid, x, x_v[0]),
-                np.where(valid, y, y_v[0]),
-            ])), 0)
-        except Exception:
-            density = np.zeros(len(x))
+        density = _cached_density(x, y)
 
         trace = go.Scattergl(
             x=x, y=y,
@@ -732,9 +782,12 @@ def make_plot_fig(r: int, c: int) -> go.Figure:
         )
 
     # Gate overlays — gates stored in raw data space; re-apply subplot transform for display
+    _eff_x_ch = x_ch or "X"   # demo subplots use "X"/"Y" as implicit channel names
+    _eff_y_ch = y_ch or "Y"
     if plot_type in ("Scatter", "Density"):
         _gtrees = st.session_state.get("gate_trees", {})
-        if file and file in _gtrees:
+        _tree_key = file if file is not None else _DEMO_KEY
+        if _tree_key in _gtrees:
             _x_cof = cfg.get("x_cofactor", 150)
             _y_cof = cfg.get("y_cofactor", 150)
             def _tx(v):  # raw → plot x
@@ -743,18 +796,18 @@ def make_plot_fig(r: int, c: int) -> go.Figure:
                 return float(apply_transform(np.array([v]), y_transform, _y_cof)[0])
 
             _subplot_gate_ids = st.session_state.get("subplot_gates", {}).get((r, c), set())
-            for _dep, _g in _gtrees[file].flat_list():
+            for _, _g in _gtrees[_tree_key].flat_list():
                 # Only draw gates that were drawn on this specific subplot
                 if _g.id not in _subplot_gate_ids:
                     continue
                 # Only draw if this subplot is showing the gate's channels
-                _x_ok = (_g.x_channel == x_ch)
-                _y_ok = (_g.y_channel == y_ch)
+                _x_ok = (_g.x_channel == _eff_x_ch)
+                _y_ok = (_g.y_channel == _eff_y_ch)
                 if _g.gate_type in (RECTANGLE, POLYGON, QUADRANT) and not (_x_ok and _y_ok):
                     continue
-                if _g.gate_type == THRESHOLD_V and not _x_ok:
+                if _g.gate_type in (THRESHOLD_V, XRANGE) and not _x_ok:
                     continue
-                if _g.gate_type == THRESHOLD_H and not _y_ok:
+                if _g.gate_type in (THRESHOLD_H, YRANGE) and not _y_ok:
                     continue
 
                 _c = _g.color; _fill = _hex_to_rgba(_c, 0.10); _p = _g.params
@@ -775,6 +828,32 @@ def make_plot_fig(r: int, c: int) -> go.Figure:
                     fig.add_vline(x=_tx(_p["x0"]), line_color=_c, line_dash="dash", line_width=1.5)
                 elif _g.gate_type == THRESHOLD_H:
                     fig.add_hline(y=_ty(_p["y0"]), line_color=_c, line_dash="dash", line_width=1.5)
+                elif _g.gate_type == XRANGE:
+                    fig.add_vrect(x0=_tx(_p["x_min"]), x1=_tx(_p["x_max"]),
+                                  fillcolor=_fill, line_color=_c, line_width=2)
+                elif _g.gate_type == YRANGE:
+                    fig.add_hrect(y0=_ty(_p["y_min"]), y1=_ty(_p["y_max"]),
+                                  fillcolor=_fill, line_color=_c, line_width=2)
+
+    # Gate overlays on histograms — xrange only (only gate type drawable on histograms)
+    if plot_type == "Histogram" and _eff_x_ch:
+        _gtrees = st.session_state.get("gate_trees", {})
+        _tree_key = file if file is not None else _DEMO_KEY
+        if _tree_key in _gtrees:
+            _x_cof = cfg.get("x_cofactor", 150)
+            def _tx(v):
+                return float(apply_transform(np.array([v]), x_transform, _x_cof)[0])
+            _subplot_gate_ids = st.session_state.get("subplot_gates", {}).get((r, c), set())
+            for _, _g in _gtrees[_tree_key].flat_list():
+                if _g.id not in _subplot_gate_ids:
+                    continue
+                if _g.gate_type == XRANGE and _g.x_channel == _eff_x_ch:
+                    _c = _g.color; _fill = _hex_to_rgba(_c, 0.15); _p = _g.params
+                    fig.add_vrect(x0=_tx(_p["x_min"]), x1=_tx(_p["x_max"]),
+                                  fillcolor=_fill, line_color=_c, line_width=2)
+                elif _g.gate_type == THRESHOLD_V and _g.x_channel == _eff_x_ch:
+                    _c = _g.color; _p = _g.params
+                    fig.add_vline(x=_tx(_p["x0"]), line_color=_c, line_dash="dash", line_width=1.5)
 
     return fig
 
@@ -814,37 +893,85 @@ def _extract_hover_list(event):
     return list(pts) if pts else []
 
 
+def _add_invisible_grid(fig: go.Figure) -> None:
+    """Add an opacity-0 scatter grid so pointer events fire anywhere on the plot area."""
+    if not fig.data:
+        return
+    _first = fig.data[0]
+    _xs = np.array(_first.x, dtype=float)
+    _ys = np.array(_first.y, dtype=float)
+    _ok = np.isfinite(_xs) & np.isfinite(_ys)
+    if not _ok.any():
+        return
+    _xr, _yr = _xs[_ok], _ys[_ok]
+    _xpad = (_xr.max() - _xr.min()) * 0.05 or 1.0
+    _ypad = (_yr.max() - _yr.min()) * 0.05 or 1.0
+    _gx = np.linspace(_xr.min() - _xpad, _xr.max() + _xpad, 50)
+    _gy = np.linspace(_yr.min() - _ypad, _yr.max() + _ypad, 50)
+    _gx_m, _gy_m = np.meshgrid(_gx, _gy)
+    fig.add_trace(go.Scatter(
+        x=_gx_m.ravel(), y=_gy_m.ravel(),
+        mode="markers",
+        marker=dict(size=14, opacity=0),
+        showlegend=False,
+        hoverinfo="none",
+    ))
+
+
+@st.fragment
+def _polygon_drawing_fragment(r: int, c: int) -> None:
+    """Polygon vertex collection rendered as a fragment — only this subplot reruns per click."""
+    verts = list(st.session_state.gate_vertices)
+    fig = make_plot_fig(r, c)
+    _add_invisible_grid(fig)
+
+    if verts:
+        vx = [v[0] for v in verts]
+        vy = [v[1] for v in verts]
+        close_x = vx + [vx[0]] if len(verts) >= 2 else vx
+        close_y = vy + [vy[0]] if len(verts) >= 2 else vy
+        fig.add_trace(go.Scatter(
+            x=close_x, y=close_y, mode="lines+markers",
+            line=dict(color="#e74c3c", dash="dot", width=2),
+            marker=dict(color="#e74c3c", size=8),
+            showlegend=False, hoverinfo="skip",
+        ))
+
+    # Key encodes len(verts) — forces fresh Plotly instance after each vertex
+    # so the next click is always a fresh selection (no deselect-first needed)
+    draw_key = f"chart_{r}_{c}_draw_{len(verts)}"
+    fig.update_layout(
+        clickmode="event+select",
+        modebar={"remove": _DRAW_MODEBAR_REMOVE},
+    )
+    event = st.plotly_chart(
+        fig, use_container_width=True, key=draw_key,
+        on_select="rerun", selection_mode="points",
+    )
+
+    pts = _extract_sel_list(event, "points")
+    if pts:
+        x, y = _xy_from_point(pts[-1])
+        if x is not None and y is not None:
+            fp = _selection_fingerprint(f"{x},{y}")
+            if st.session_state.processed_selection.get("last") != fp:
+                st.session_state.processed_selection["last"] = fp
+                st.session_state.gate_vertices = verts + [(float(x), float(y))]
+                st.session_state.processed_selection = {}
+                st.rerun()  # fragment rerun only — other subplots untouched
+
+
 def _render_drawing_chart(r, c, tool):
-    """Render a subplot in drawing mode. Rectangle uses drag-box; others use click."""
+    """Render a subplot in drawing mode. Rectangle uses drag-box; polygon uses fragment; others use click."""
+    if tool == "polygon":
+        _polygon_drawing_fragment(r, c)
+        return
+
     cfg = st.session_state.subplot_config[(r, c)]
     fig = make_plot_fig(r, c)
-
-    # Invisible SVG grid — go.Scatter (SVG) keeps DOM elements at opacity=0 so
-    # pointer events (click-selection, hover) still fire anywhere on the plot.
-    if fig.data:
-        _first = fig.data[0]
-        _xs = np.array(_first.x, dtype=float)
-        _ys = np.array(_first.y, dtype=float)
-        _ok = np.isfinite(_xs) & np.isfinite(_ys)
-        if _ok.any():
-            _xr, _yr = _xs[_ok], _ys[_ok]
-            _xpad = (_xr.max() - _xr.min()) * 0.05 or 1.0
-            _ypad = (_yr.max() - _yr.min()) * 0.05 or 1.0
-            _gx = np.linspace(_xr.min() - _xpad, _xr.max() + _xpad, 50)
-            _gy = np.linspace(_yr.min() - _ypad, _yr.max() + _ypad, 50)
-            _gx_m, _gy_m = np.meshgrid(_gx, _gy)
-            fig.add_trace(go.Scatter(
-                x=_gx_m.ravel(), y=_gy_m.ravel(),
-                mode="markers",
-                marker=dict(size=14, opacity=0),
-                showlegend=False,
-                hoverinfo="none",
-            ))
+    _add_invisible_grid(fig)
 
     if tool == "rectangle":
-        # Drag-to-draw: set dragmode='select' so Plotly renders the selection box
-        # live on the client during the drag — that IS the shape preview.
-        # On mouse-up the box coordinates come back via event.selection.box.
         fig.update_layout(
             dragmode="select",
             modebar={"remove": _DRAW_MODEBAR_REMOVE},
@@ -861,7 +988,7 @@ def _render_drawing_chart(r, c, tool):
             if xr and yr and len(xr) >= 2 and len(yr) >= 2:
                 x_min, x_max = float(min(xr)), float(max(xr))
                 y_min, y_max = float(min(yr)), float(max(yr))
-                if x_max > x_min and y_max > y_min:   # ignore accidental zero-area clicks
+                if x_max > x_min and y_max > y_min:
                     _x_tr = cfg.get("x_transform", "Linear"); _x_cof = cfg.get("x_cofactor", 150)
                     _y_tr = cfg.get("y_transform", "Linear"); _y_cof = cfg.get("y_cofactor", 150)
                     gate = Gate(
@@ -879,25 +1006,56 @@ def _render_drawing_chart(r, c, tool):
                     st.session_state.drawing_subplot = None
                     st.rerun()
 
+    elif tool in ("xrange", "yrange"):
+        fig.update_layout(
+            dragmode="select",
+            modebar={"remove": _DRAW_MODEBAR_REMOVE},
+        )
+        event = st.plotly_chart(
+            fig, use_container_width=True, key=f"chart_{r}_{c}_draw",
+            on_select="rerun", selection_mode="box",
+        )
+        box = _extract_sel_list(event, "box")
+        if box:
+            bx = box[0]
+            xr = bx.get("x") if isinstance(bx, dict) else getattr(bx, "x", None)
+            yr = bx.get("y") if isinstance(bx, dict) else getattr(bx, "y", None)
+            _x_tr = cfg.get("x_transform", "Linear"); _x_cof = cfg.get("x_cofactor", 150)
+            _y_tr = cfg.get("y_transform", "Linear"); _y_cof = cfg.get("y_cofactor", 150)
+            if tool == "xrange" and xr and len(xr) >= 2:
+                x_min, x_max = float(min(xr)), float(max(xr))
+                if x_max > x_min:
+                    gate = Gate(
+                        name="Gate", gate_type=XRANGE,
+                        x_channel=cfg.get("x_ch") or "X",
+                        y_channel=cfg.get("y_ch"),
+                        params={
+                            "x_min": _inverse_transform(x_min, _x_tr, _x_cof),
+                            "x_max": _inverse_transform(x_max, _x_tr, _x_cof),
+                        },
+                    )
+                    st.session_state.pending_gate = {"gate_obj": gate, "file": cfg.get("file"), "subplot_rc": (r, c), "parent_id": cfg.get("gate_id") or GateTree.ROOT_ID}
+                    st.session_state.drawing_subplot = None
+                    st.rerun()
+            elif tool == "yrange" and yr and len(yr) >= 2:
+                y_min, y_max = float(min(yr)), float(max(yr))
+                if y_max > y_min:
+                    gate = Gate(
+                        name="Gate", gate_type=YRANGE,
+                        x_channel=cfg.get("x_ch"),
+                        y_channel=cfg.get("y_ch") or "Y",
+                        params={
+                            "y_min": _inverse_transform(y_min, _y_tr, _y_cof),
+                            "y_max": _inverse_transform(y_max, _y_tr, _y_cof),
+                        },
+                    )
+                    st.session_state.pending_gate = {"gate_obj": gate, "file": cfg.get("file"), "subplot_rc": (r, c), "parent_id": cfg.get("gate_id") or GateTree.ROOT_ID}
+                    st.session_state.drawing_subplot = None
+                    st.rerun()
+
     else:
-        # Click-based for polygon / quadrant / threshold
+        # Quadrant / threshold — single click, direct tree mutation
         verts = list(st.session_state.gate_vertices)
-
-        # Confirmed polygon vertex preview
-        if verts and tool == "polygon":
-            vx = [v[0] for v in verts]
-            vy = [v[1] for v in verts]
-            close_x = vx + [vx[0]] if len(verts) >= 2 else vx
-            close_y = vy + [vy[0]] if len(verts) >= 2 else vy
-            fig.add_trace(go.Scatter(
-                x=close_x, y=close_y, mode="lines+markers",
-                line=dict(color="#e74c3c", dash="dot", width=2),
-                marker=dict(color="#e74c3c", size=8),
-                showlegend=False, hoverinfo="skip",
-            ))
-
-        # Key encodes len(verts) — forces fresh Plotly instance after each vertex
-        # so the next click is always a fresh selection (no deselect-first needed)
         draw_key = f"chart_{r}_{c}_draw_{len(verts)}"
         fig.update_layout(
             clickmode="event+select",
@@ -915,35 +1073,48 @@ def _render_drawing_chart(r, c, tool):
                 fp = _selection_fingerprint(f"{x},{y}")
                 if st.session_state.processed_selection.get("last") != fp:
                     st.session_state.processed_selection["last"] = fp
-
-                    if tool == "polygon":
-                        new_verts = verts + [(float(x), float(y))]
-                        st.session_state.gate_vertices = new_verts
-                        st.session_state.processed_selection = {}
-                        st.rerun()
-
+                    file = cfg.get("file")
+                    x_ch = cfg.get("x_ch") or "X"
+                    y_ch = cfg.get("y_ch") or "Y"
+                    _x_tr = cfg.get("x_transform", "Linear"); _x_cof = cfg.get("x_cofactor", 150)
+                    _y_tr = cfg.get("y_transform", "Linear"); _y_cof = cfg.get("y_cofactor", 150)
+                    _rx = _inverse_transform(float(x), _x_tr, _x_cof)
+                    _ry = _inverse_transform(float(y), _y_tr, _y_cof)
+                    _parent_id = cfg.get("gate_id") or GateTree.ROOT_ID
+                    if tool == "quadrant":
+                        _gate_objs = [
+                            Gate(name="Q1", gate_type=QUADRANT, x_channel=x_ch, y_channel=y_ch, params={"x0": _rx, "y0": _ry, "quadrant": "Q1"}),
+                            Gate(name="Q2", gate_type=QUADRANT, x_channel=x_ch, y_channel=y_ch, params={"x0": _rx, "y0": _ry, "quadrant": "Q2"}),
+                            Gate(name="Q3", gate_type=QUADRANT, x_channel=x_ch, y_channel=y_ch, params={"x0": _rx, "y0": _ry, "quadrant": "Q3"}),
+                            Gate(name="Q4", gate_type=QUADRANT, x_channel=x_ch, y_channel=y_ch, params={"x0": _rx, "y0": _ry, "quadrant": "Q4"}),
+                        ]
+                        _suffixes = ["-Q1", "-Q2", "-Q3", "-Q4"]
+                    elif tool == "threshold_v":
+                        _gate_objs = [
+                            Gate(name="T-L", gate_type=THRESHOLD_V, x_channel=x_ch, y_channel=None, params={"x0": _rx, "side": "left"}),
+                            Gate(name="T-R", gate_type=THRESHOLD_V, x_channel=x_ch, y_channel=None, params={"x0": _rx, "side": "right"}),
+                        ]
+                        _suffixes = ["-L", "-R"]
+                    elif tool == "threshold_h":
+                        _gate_objs = [
+                            Gate(name="T-B", gate_type=THRESHOLD_H, x_channel=None, y_channel=y_ch, params={"y0": _ry, "side": "bottom"}),
+                            Gate(name="T-T", gate_type=THRESHOLD_H, x_channel=None, y_channel=y_ch, params={"y0": _ry, "side": "top"}),
+                        ]
+                        _suffixes = ["-B", "-T"]
                     else:
-                        # Quadrant / threshold — one click, direct tree mutation
-                        file = cfg.get("file")
-                        x_ch = cfg.get("x_ch") or "X"
-                        y_ch = cfg.get("y_ch") or "Y"
-                        _x_tr = cfg.get("x_transform", "Linear"); _x_cof = cfg.get("x_cofactor", 150)
-                        _y_tr = cfg.get("y_transform", "Linear"); _y_cof = cfg.get("y_cofactor", 150)
-                        _rx = _inverse_transform(float(x), _x_tr, _x_cof)
-                        _ry = _inverse_transform(float(y), _y_tr, _y_cof)
-                        if file and file in st.session_state.gate_trees:
-                            tree = st.session_state.gate_trees[file]
-                            _parent_id = cfg.get("gate_id") or GateTree.ROOT_ID
-                            if tool == "quadrant":
-                                _new_ids = tree.add_quadrant_gates(_parent_id, x_ch, y_ch, _rx, _ry)
-                            elif tool == "threshold_v":
-                                _new_ids = tree.add_threshold_pair(_parent_id, "v", x_ch, _rx)
-                            elif tool == "threshold_h":
-                                _new_ids = tree.add_threshold_pair(_parent_id, "h", y_ch, _ry)
-                            else:
-                                _new_ids = []
-                            st.session_state.subplot_gates.setdefault((r, c), set()).update(_new_ids)
-                        _cancel_drawing()
+                        _gate_objs = []
+                        _suffixes = []
+                    if _gate_objs:
+                        st.session_state.pending_gate = {
+                            "gate_objs": _gate_objs,
+                            "suffixes": _suffixes,
+                            "file": file,
+                            "subplot_rc": (r, c),
+                            "parent_id": _parent_id,
+                        }
+                        st.session_state.drawing_subplot = None
+                        st.session_state.active_gate_tool = None
+                        st.session_state.processed_selection = {}
                         st.rerun()
 
 
@@ -1139,6 +1310,12 @@ def subplot_label(r: int, c: int) -> str:
             return f"{_lbl} > {_path}"
         return _lbl
 
+    _gate_id = cfg.get("gate_id")
+    if _gate_id and _DEMO_KEY in st.session_state.gate_trees and _gate_id in st.session_state.gate_trees[_DEMO_KEY]._gates:
+        _gtree = st.session_state.gate_trees[_DEMO_KEY]
+        _gate = _gtree.get_gate(_gate_id)
+        _path = " > ".join([a.name for a in _gtree.get_ancestors(_gate_id)] + [_gate.name])
+        return f"Demo > {_path}"
     return "Demo (random data)"
 
 
@@ -1157,7 +1334,7 @@ for r in range(1, rows + 1):
         c = c_idx + 1
         with col_widget:
             is_drawing = _drawing_rc == (r, c)
-            can_draw = bool(_active_tool) and _is_drawable_subplot(r, c)
+            can_draw = bool(_active_tool) and _is_drawable_subplot(r, c, _active_tool)
 
             if is_drawing:
                 # Cancel button replaces title while drawing
@@ -1206,10 +1383,18 @@ if clicked_subplot:
 @st.dialog("Name this gate")
 def gate_name_dialog():
     pg = st.session_state.pending_gate
-    gate = pg["gate_obj"]
     file = pg["file"]
+    is_group = "gate_objs" in pg
 
-    name = st.text_input("Gate name", value="Gate")
+    if is_group:
+        suffixes = pg["suffixes"]
+        default_prefix = "Gate"
+        prefix = st.text_input("Gate name prefix", value=default_prefix)
+        preview = ", ".join(f"{prefix or default_prefix}{s}" for s in suffixes)
+        st.caption(f"Will create: {preview}")
+    else:
+        gate = pg["gate_obj"]
+        name = st.text_input("Gate name", value="Gate")
 
     saved_preset = "Red"
     preset_options = list(PRESET_COLORS.keys()) + ["Custom"]
@@ -1227,14 +1412,29 @@ def gate_name_dialog():
     col1, col2 = st.columns(2)
     with col1:
         if st.button("Save gate", type="primary", use_container_width=True):
-            gate.name = name.strip() or "Gate"
-            gate.color = chosen_color
-            if file and file in st.session_state.gate_trees:
+            _eff_file = file or _DEMO_KEY
+            if _eff_file in st.session_state.gate_trees:
+                _tree = st.session_state.gate_trees[_eff_file]
                 _parent_id = pg.get("parent_id") or GateTree.ROOT_ID
-                _gid = st.session_state.gate_trees[file].add_gate(gate, _parent_id)
                 _src_rc = pg.get("subplot_rc")
-                if _src_rc:
-                    st.session_state.subplot_gates.setdefault(_src_rc, set()).add(_gid)
+                if is_group:
+                    _pfx = (prefix.strip() or default_prefix)
+                    _group_ids = set()
+                    for _g, _sfx in zip(pg["gate_objs"], pg["suffixes"]):
+                        _g.name = f"{_pfx}{_sfx}"
+                        _g.color = chosen_color
+                        _gid = _tree.add_gate(_g, _parent_id)
+                        _group_ids.add(_gid)
+                        if _src_rc:
+                            st.session_state.subplot_gates.setdefault(_src_rc, set()).add(_gid)
+                    for _gid in _group_ids:
+                        st.session_state.gate_groups[_gid] = _group_ids
+                else:
+                    gate.name = name.strip() or "Gate"
+                    gate.color = chosen_color
+                    _gid = _tree.add_gate(gate, _parent_id)
+                    if _src_rc:
+                        st.session_state.subplot_gates.setdefault(_src_rc, set()).add(_gid)
             st.session_state.pending_gate = None
             st.rerun()
     with col2:
@@ -1252,7 +1452,7 @@ def _build_gate_table_rows():
     for fname, tree in st.session_state.gate_trees.items():
         if fname not in st.session_state.fcs_data or len(tree) == 0:
             continue
-        lbl = st.session_state.file_labels.get(fname, os.path.basename(fname))
+        lbl = "Demo" if fname == _DEMO_KEY else st.session_state.file_labels.get(fname, os.path.basename(fname))
         fdata = st.session_state.fcs_data[fname]["data"]
         total = len(fdata)
         for _, gate in tree.flat_list():

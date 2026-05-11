@@ -21,8 +21,10 @@ RECTANGLE = "rectangle"
 QUADRANT = "quadrant"
 THRESHOLD_V = "threshold_v"
 THRESHOLD_H = "threshold_h"
+XRANGE = "xrange"
+YRANGE = "yrange"
 
-GATE_TYPES = [POLYGON, RECTANGLE, QUADRANT, THRESHOLD_V, THRESHOLD_H]
+GATE_TYPES = [POLYGON, RECTANGLE, QUADRANT, THRESHOLD_V, THRESHOLD_H, XRANGE, YRANGE]
 
 
 # ---------------------------------------------------------------------------
@@ -61,6 +63,8 @@ class Gate:
                   Q1=top-right, Q2=top-left, Q3=bottom-left, Q4=bottom-right
     threshold_v : {"x0": float, "side": "left"|"right"}
     threshold_h : {"y0": float, "side": "top"|"bottom"}
+    xrange      : {"x_min": float, "x_max": float}  — 1-D interval on x_channel
+    yrange      : {"y_min": float, "y_max": float}  — 1-D interval on y_channel
     """
     name: str
     gate_type: str
@@ -111,6 +115,14 @@ class Gate:
             if self.params["side"] == "bottom":
                 return yv <= self.params["y0"]
             return yv > self.params["y0"]
+
+        if self.gate_type == XRANGE:
+            xv = data[self.x_channel].values
+            return (xv >= self.params["x_min"]) & (xv <= self.params["x_max"])
+
+        if self.gate_type == YRANGE:
+            yv = data[self.y_channel].values
+            return (yv >= self.params["y_min"]) & (yv <= self.params["y_max"])
 
         return np.ones(len(data), dtype=bool)
 
