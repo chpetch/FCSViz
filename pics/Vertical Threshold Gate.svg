@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="Vertical threshold gate icon">
+  <defs>
+    <clipPath id="clip"><rect x="0" y="0" width="512" height="512" rx="96" ry="96"></rect></clipPath>
+  </defs>
+  <rect x="0" y="0" width="512" height="512" rx="96" ry="96" fill="#FFFFFF"></rect>
+  <g clip-path="url(#clip)">
+    <g><circle cx="130" cy="200" r="18" fill="#8A96A8" fill-opacity="0.65"></circle><circle cx="180" cy="290" r="18" fill="#8A96A8" fill-opacity="0.65"></circle><circle cx="150" cy="360" r="18" fill="#8A96A8" fill-opacity="0.65"></circle><circle cx="330" cy="175" r="18" fill="#4C8ED9" fill-opacity="0.95"></circle><circle cx="385" cy="245" r="18" fill="#4C8ED9" fill-opacity="0.95"></circle><circle cx="340" cy="320" r="18" fill="#4C8ED9" fill-opacity="0.95"></circle><circle cx="395" cy="380" r="18" fill="#4C8ED9" fill-opacity="0.95"></circle></g>
+    <line x1="256" y1="80" x2="256" y2="432" stroke="#1B2A4A" stroke-width="9" stroke-linecap="round"></line>
+  </g>
+</svg>

@@ -1,3 +1,4 @@
+import base64
 import json
 import os
 import tempfile
@@ -9,8 +10,40 @@ import plotly.graph_objects as go
 import streamlit as st
 from gates import Gate, GateTree, RECTANGLE, POLYGON, QUADRANT, THRESHOLD_V, THRESHOLD_H, XRANGE, YRANGE
 
+_GATE_ICON_FILES = {
+    RECTANGLE:   "pics/Rectangle Gate.svg",
+    POLYGON:     "pics/Polygon Gate.svg",
+    QUADRANT:    "pics/Quadrant Gate.svg",
+    THRESHOLD_V: "pics/Vertical Threshold Gate.svg",
+    THRESHOLD_H: "pics/Horizontal Threshold Gate.svg",
+    XRANGE:      "pics/X-Range Gate.svg",
+    YRANGE:      "pics/Y-Range Gate.svg",
+}
+
+_TOOL_ICON_FILES = {
+    "rectangle":   "pics/Rectangle Gate.svg",
+    "polygon":     "pics/Polygon Gate.svg",
+    "quadrant":    "pics/Quadrant Gate.svg",
+    "threshold_v": "pics/Vertical Threshold Gate.svg",
+    "threshold_h": "pics/Horizontal Threshold Gate.svg",
+    "xrange":      "pics/X-Range Gate.svg",
+    "yrange":      "pics/Y-Range Gate.svg",
+}
+
+@st.cache_data
+def _svg_b64(path: str) -> str:
+    with open(path, "rb") as f:
+        return base64.b64encode(f.read()).decode()
+
+def _gate_icon_html(gate_type: str, size: int = 18) -> str:
+    path = _GATE_ICON_FILES.get(gate_type, "")
+    if not path or not os.path.exists(path):
+        return ""
+    b64 = _svg_b64(path)
+    return f'<img src="data:image/svg+xml;base64,{b64}" width="{size}" height="{size}" style="vertical-align:middle;margin-right:4px">'
+
 st.set_page_config(page_title="FCSViz", layout="wide")
-st.image("FCSViz-banner-web.jpg", use_container_width=True)
+st.image("pics/FCSViz Banner.svg", use_container_width=True)
 
 with st.expander("How to use", expanded=False):
     st.markdown(
@@ -229,26 +262,52 @@ st.markdown(
 _has_fcs = bool(st.session_state.fcs_data)
 _TOOLS = [
     ("rectangle",   "▭",  "Rectangle gate"),
-    ("polygon",     "⬠",  "Polygon gate (lasso)"),
+    ("polygon",     "⬠",  "Polygon gate"),
     ("quadrant",    "⊞",  "Quadrant gates (4 regions)"),
     ("threshold_v", "|",   "Vertical threshold"),
     ("threshold_h", "—",   "Horizontal threshold"),
     ("xrange",      "↔",   "X-range gate [xmin, xmax]"),
     ("yrange",      "↕",   "Y-range gate [ymin, ymax]"),
 ]
-_tool_cols = st.columns([1, 1, 1, 1, 1, 1, 1, 4])
+_toolbar_cols = st.columns([1.2, 1, 1, 1, 1, 1, 1, 1, 4], vertical_alignment="center")
+with _toolbar_cols[0]:
+    st.markdown("**Gate:**")
+_tool_cols = _toolbar_cols[1:]
 _drawing_plot_type = (
     st.session_state.subplot_config.get(st.session_state.drawing_subplot, {}).get("plot_type")
     if st.session_state.drawing_subplot else None
 )
+
+# Build per-button CSS: each button gets its SVG as background-image via a
+# marker <div id="gtool-{tid}"> injected before it; :has() targets that column.
+_tool_icon_css = []
+for _tid_css, _icon_css, _ in _TOOLS:
+    _ip = _TOOL_ICON_FILES.get(_tid_css, "")
+    if _ip and os.path.exists(_ip):
+        _b = _svg_b64(_ip)
+        _tool_icon_css.append(
+            f'[data-testid="stColumn"]:has(#gtool-{_tid_css}) button{{'
+            f'background-image:url("data:image/svg+xml;base64,{_b}");'
+            f'background-size:100%;background-repeat:no-repeat;'
+            f'background-position:center;min-height:52px;}}'
+            # Keep icon visible on active (primary/blue) buttons by blending
+            f'[data-testid="stColumn"]:has(#gtool-{_tid_css}) button[kind="primary"]{{'
+            f'background-blend-mode:screen;}}'
+        )
+
+if _tool_icon_css:
+    st.markdown(f"<style>{''.join(_tool_icon_css)}</style>", unsafe_allow_html=True)
+
 for (_tid, _icon, _tip), _col in zip(_TOOLS, _tool_cols):
     with _col:
         _is_active = st.session_state.active_gate_tool == _tid
         _tool_disabled = not _has_fcs or (
             _drawing_plot_type == "Histogram" and _tid not in _HISTOGRAM_TOOLS
         )
+        st.markdown(f'<div id="gtool-{_tid}"></div>', unsafe_allow_html=True)
         if st.button(
-            _icon, key=f"_tool_{_tid}", help=_tip,
+            "",
+            key=f"_tool_{_tid}", help=_tip,
             disabled=_tool_disabled,
             type="primary" if _is_active else "secondary",
             use_container_width=True,

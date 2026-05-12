@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="Rectangle gate icon">
+  <defs>
+    <clipPath id="clip"><rect x="0" y="0" width="512" height="512" rx="96" ry="96"></rect></clipPath>
+  </defs>
+  <rect x="0" y="0" width="512" height="512" rx="96" ry="96" fill="#FFFFFF"></rect>
+  <g clip-path="url(#clip)">
+    <g><circle cx="200" cy="200" r="18" fill="#1B2A4A" fill-opacity="0.95"></circle><circle cx="275" cy="215" r="18" fill="#1B2A4A" fill-opacity="0.95"></circle><circle cx="340" cy="195" r="18" fill="#1B2A4A" fill-opacity="0.95"></circle><circle cx="220" cy="270" r="18" fill="#1B2A4A" fill-opacity="0.95"></circle><circle cx="305" cy="280" r="18" fill="#1B2A4A" fill-opacity="0.95"></circle><circle cx="365" cy="265" r="18" fill="#1B2A4A" fill-opacity="0.95"></circle><circle cx="255" cy="335" r="18" fill="#1B2A4A" fill-opacity="0.95"></circle><circle cx="330" cy="340" r="18" fill="#1B2A4A" fill-opacity="0.95"></circle><circle cx="110" cy="415" r="18" fill="#8A96A8" fill-opacity="0.6"></circle><circle cx="415" cy="130" r="18" fill="#8A96A8" fill-opacity="0.6"></circle></g>
+    <rect x="140" y="140" width="260" height="240" rx="22" ry="22" fill="none" stroke="#1B2A4A" stroke-width="9" stroke-linejoin="round"></rect>
+  </g>
+</svg>
