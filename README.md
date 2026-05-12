@@ -1,4 +1,4 @@
-# FSCViz
+# FCSViz
 
 An interactive browser-based viewer for Flow Cytometry Standard (FCS) files built with Streamlit and Plotly. Configure a grid of plots, each showing a different channel combination or file, with live zoom and hover.
 
@@ -20,7 +20,7 @@ Requires Python 3.9+ and conda (or a plain venv).
 ```bash
 # clone the repo
 git clone <repo-url>
-cd FSCViz
+cd FCSViz
 
 # create and activate environment
 conda create -n fscviz python=3.9 -y
@@ -34,7 +34,7 @@ pip install -r requirements.txt
 
 ```bash
 conda activate fscviz
-streamlit run FSCviz.py
+streamlit run FCSviz.py
 ```
 
 Then open [http://localhost:8501](http://localhost:8501) in your browser.
@@ -61,8 +61,8 @@ Then open [http://localhost:8501](http://localhost:8501) in your browser.
 ## Project structure
 
 ```
-FSCViz/
-├── FSCviz.py               # main page — grid viewer
+FCSViz/
+├── FCSviz.py               # main page — grid viewer
 ├── pages/
 │   └── 1_Metadata.py       # metadata page
 ├── requirements.txt
