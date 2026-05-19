@@ -1,13 +1,20 @@
+from _shared import init_session_state, render_upload_sidebar
+
 import pandas as pd
 import streamlit as st
 
-st.set_page_config(page_title="FSCViz – Metadata", layout="wide")
+st.set_page_config(page_title="FCSViz – Metadata", layout="wide")
+init_session_state()
+
+with st.sidebar:
+    render_upload_sidebar()
+
 st.title("FCS File Metadata")
 
 fcs_data = st.session_state.get("fcs_data", {})
 
 if not fcs_data:
-    st.info("No FCS files loaded. Upload files on the main page.")
+    st.info("No FCS files loaded. Upload files using the sidebar.")
     st.stop()
 
 
