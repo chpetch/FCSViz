@@ -452,6 +452,29 @@ def plot_dialog(r: int, c: int):
         else:
             st.caption(f"All layers use channel: {_disp_x}")
 
+        # Compatible-file filter: same instrument ($CYT) and must have the required channels
+        _primary_cyt = None
+        if selected_file and selected_file in fcs_data:
+            _pcyt = str(fcs_data[selected_file]["meta"].get("$CYT", "")).strip()
+            if _pcyt:
+                _primary_cyt = _pcyt
+        _compat_keys = set()
+        for _fk, _finfo in fcs_data.items():
+            if _fk == _DEMO_KEY:
+                continue
+            _fch = _finfo.get("channels", [])
+            if _disp_x not in _fch:
+                continue
+            if plot_type == "Scatter" and _disp_y not in _fch:
+                continue
+            if _primary_cyt:
+                _fcyt = str(_finfo.get("meta", {}).get("$CYT", "")).strip()
+                if _fcyt and _fcyt != _primary_cyt:
+                    continue
+            _compat_keys.add(_fk)
+        _ovl_label_map = {st.session_state.file_labels.get(f, f): f for f in _compat_keys}
+        _ovl_file_opts = [_NO_FILE] + list(_ovl_label_map.keys())
+
         if _ovl_key not in st.session_state:
             _init_layers = []
             for _l in cfg.get("overlay_layers", []):
@@ -469,22 +492,24 @@ def plot_dialog(r: int, c: int):
                 _lc1, _lc2 = st.columns([5, 1])
                 with _lc1:
                     _l_saved_file = _layer.get("file")
+                    if _l_saved_file not in _compat_keys:
+                        _l_saved_file = None  # reset if no longer compatible
                     _l_saved_disp = (
                         st.session_state.file_labels.get(_l_saved_file, _l_saved_file)
                         if _l_saved_file else _NO_FILE
                     )
                     _l_file_idx = (
-                        file_display_opts.index(_l_saved_disp)
-                        if _l_saved_disp in file_display_opts else 0
+                        _ovl_file_opts.index(_l_saved_disp)
+                        if _l_saved_disp in _ovl_file_opts else 0
                     )
                     _l_disp = st.selectbox(
                         f"Layer {_li + 2}",
-                        file_display_opts,
+                        _ovl_file_opts,
                         index=_l_file_idx,
                         key=f"_ovl_file_{r}_{c}_{_lid}",
                         label_visibility="collapsed",
                     )
-                    _l_file = None if _l_disp == _NO_FILE else _label_map.get(_l_disp)
+                    _l_file = None if _l_disp == _NO_FILE else _ovl_label_map.get(_l_disp)
                     working_layers[_li]["file"] = _l_file
                 with _lc2:
                     if st.button("×", key=f"_rm_ovl_{r}_{c}_{_lid}", help="Remove layer"):
@@ -539,7 +564,9 @@ def plot_dialog(r: int, c: int):
                 working_layers.pop(_li)
 
         _OVERLAY_DEFAULT_COLORS = ["#d62728", "#2ca02c", "#ff7f0e", "#9467bd", "#17becf"]
-        if st.button("＋ Add layer", key=f"_add_ovl_{r}_{c}"):
+        if not _compat_keys:
+            st.caption("No compatible files — upload files with matching channels and instrument.")
+        if _compat_keys and st.button("＋ Add layer", key=f"_add_ovl_{r}_{c}"):
             _new_color = _OVERLAY_DEFAULT_COLORS[len(working_layers) % len(_OVERLAY_DEFAULT_COLORS)]
             working_layers.append({
                 "file": None,
