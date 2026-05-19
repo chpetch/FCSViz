@@ -428,44 +428,13 @@ def plot_dialog(r: int, c: int):
     st.divider()
     if plot_type != "Density":
         saved_color = cfg.get("color", "#1f77b4")
-        saved_preset = next((k for k, v in PRESET_COLORS.items() if v == saved_color), "Custom")
-        preset_options = list(PRESET_COLORS.keys()) + ["Custom"]
-
-        _mid = f"cpick-{r}-{c}"
-        st.markdown(f'<span id="{_mid}"></span>', unsafe_allow_html=True)
-
-        _rules = []
-        for _i, (_name, _hex) in enumerate(PRESET_COLORS.items()):
-            _n = _i + 1
-            _rules.append(
-                f"div:has(#{_mid})~[data-testid='stRadio'] label:nth-child({_n})>div:first-child"
-                f"{{display:none!important;}}"
-                f"div:has(#{_mid})~[data-testid='stRadio'] label:nth-child({_n}) p"
-                f"{{color:{_hex}!important;font-weight:700!important;font-size:14px!important;}}"
-            )
-        _rules.append(
-            f"div:has(#{_mid})~[data-testid='stRadio'] label:has(input:checked) p"
-            f"{{text-decoration:underline!important;text-underline-offset:3px!important;}}"
-        )
-        st.markdown(f"<style>{''.join(_rules)}</style>", unsafe_allow_html=True)
-
         st.write("**Color**")
-        color_choice = st.radio(
+        final_color = st.color_picker(
             "Color",
-            preset_options,
-            index=preset_options.index(saved_preset),
-            horizontal=True,
-            key=f"_crad_{r}_{c}",
+            value=saved_color,
+            key=f"_cpick_{r}_{c}",
             label_visibility="collapsed",
         )
-        if color_choice == "Custom":
-            final_color = st.color_picker(
-                "Color",
-                value=saved_color if saved_preset == "Custom" else "#1f77b4",
-                label_visibility="collapsed",
-            )
-        else:
-            final_color = PRESET_COLORS[color_choice]
 
         _default_op = 0.4 if plot_type == "Scatter" else 0.8
         primary_opacity = st.slider(
