@@ -1,6 +1,7 @@
 import base64
 import json
 import os
+import uuid
 
 import numpy as np
 import plotly.graph_objects as go
@@ -320,7 +321,7 @@ for r in range(1, rows + 1):
     for c in range(1, cols + 1):
         st.session_state.seeds.setdefault((r, c), (r - 1) * cols + (c - 1))
         st.session_state.subplot_config.setdefault(
-            (r, c), {"configured": False, "file": None, "plot_type": "Scatter", "x_ch": None, "y_ch": None, "n_bins": 256, "color": "#1f77b4", "x_transform": "Linear", "y_transform": "Linear", "x_cofactor": 150, "y_cofactor": 150, "gate_id": None}
+            (r, c), {"configured": False, "file": None, "plot_type": "Scatter", "x_ch": None, "y_ch": None, "n_bins": 256, "color": "#1f77b4", "opacity": 0.4, "x_transform": "Linear", "y_transform": "Linear", "x_cofactor": 150, "y_cofactor": 150, "gate_id": None, "overlay_layers": []}
         )
 
 
@@ -331,6 +332,7 @@ _dr, _dc = st.session_state.dialog_coords
 def plot_dialog(r: int, c: int):
     cfg = st.session_state.subplot_config[(r, c)]
     fcs_data = st.session_state.fcs_data
+    _ovl_key = f"_ovl_{r}_{c}"
 
     saved_file = cfg.get("file")
     _label_map = {st.session_state.file_labels.get(f, f): f for f in fcs_data.keys()}
@@ -464,8 +466,122 @@ def plot_dialog(r: int, c: int):
             )
         else:
             final_color = PRESET_COLORS[color_choice]
+
+        _default_op = 0.4 if plot_type == "Scatter" else 0.8
+        primary_opacity = st.slider(
+            "Opacity", 0.1, 1.0,
+            value=float(cfg.get("opacity", _default_op)),
+            step=0.05,
+            key=f"_op_{r}_{c}",
+        )
+
+        st.write("**Overlay layers**")
+        _disp_x = x_ch or cfg.get("x_ch") or "X"
+        _disp_y = y_ch or cfg.get("y_ch") or "Y"
+        if plot_type == "Scatter":
+            st.caption(f"All layers use channels: {_disp_x} · {_disp_y}")
+        else:
+            st.caption(f"All layers use channel: {_disp_x}")
+
+        if _ovl_key not in st.session_state:
+            _init_layers = []
+            for _l in cfg.get("overlay_layers", []):
+                _lc = dict(_l)
+                if "_id" not in _lc:
+                    _lc["_id"] = uuid.uuid4().hex[:8]
+                _init_layers.append(_lc)
+            st.session_state[_ovl_key] = _init_layers
+        working_layers = st.session_state[_ovl_key]
+
+        _layers_to_remove = []
+        for _li, _layer in enumerate(working_layers):
+            _lid = _layer["_id"]
+            with st.container(border=True):
+                _lc1, _lc2 = st.columns([5, 1])
+                with _lc1:
+                    _l_saved_file = _layer.get("file")
+                    _l_saved_disp = (
+                        st.session_state.file_labels.get(_l_saved_file, _l_saved_file)
+                        if _l_saved_file else _NO_FILE
+                    )
+                    _l_file_idx = (
+                        file_display_opts.index(_l_saved_disp)
+                        if _l_saved_disp in file_display_opts else 0
+                    )
+                    _l_disp = st.selectbox(
+                        f"Layer {_li + 2}",
+                        file_display_opts,
+                        index=_l_file_idx,
+                        key=f"_ovl_file_{r}_{c}_{_lid}",
+                        label_visibility="collapsed",
+                    )
+                    _l_file = None if _l_disp == _NO_FILE else _label_map.get(_l_disp)
+                    working_layers[_li]["file"] = _l_file
+                with _lc2:
+                    if st.button("×", key=f"_rm_ovl_{r}_{c}_{_lid}", help="Remove layer"):
+                        _layers_to_remove.append(_li)
+
+                _l_gate_id = _layer.get("gate_id")
+                if _l_file and _l_file in st.session_state.gate_trees:
+                    _l_tree = st.session_state.gate_trees[_l_file]
+                    if len(_l_tree) > 0:
+                        _l_flat = _l_tree.flat_list()
+                        _l_pop_labels = ["All Events"] + [
+                            " > ".join([a.name for a in _l_tree.get_ancestors(_g.id)] + [_g.name])
+                            for _, _g in _l_flat
+                        ]
+                        _l_pop_ids = [None] + [_g.id for _, _g in _l_flat]
+                        _l_saved_gate_idx = (
+                            _l_pop_ids.index(_l_gate_id) if _l_gate_id in _l_pop_ids else 0
+                        )
+                        _l_gate_choice = st.selectbox(
+                            "Population",
+                            range(len(_l_pop_labels)),
+                            format_func=lambda _j, _lpl=_l_pop_labels: _lpl[_j],
+                            index=_l_saved_gate_idx,
+                            key=f"_ovl_gate_{r}_{c}_{_lid}",
+                        )
+                        _l_gate_id = _l_pop_ids[_l_gate_choice]
+                working_layers[_li]["gate_id"] = _l_gate_id
+
+                _lcc1, _lcc2 = st.columns([1, 2])
+                with _lcc1:
+                    _l_color = st.color_picker(
+                        "Color",
+                        value=_layer.get("color", "#d62728"),
+                        key=f"_ovl_color_{r}_{c}_{_lid}",
+                        label_visibility="collapsed",
+                    )
+                    working_layers[_li]["color"] = _l_color
+                with _lcc2:
+                    _l_opacity = st.slider(
+                        "Opacity", 0.1, 1.0,
+                        value=float(_layer.get("opacity", _default_op)),
+                        step=0.05,
+                        key=f"_ovl_op_{r}_{c}_{_lid}",
+                    )
+                    working_layers[_li]["opacity"] = _l_opacity
+
+        if _layers_to_remove:
+            for _li in sorted(_layers_to_remove, reverse=True):
+                _lid = working_layers[_li]["_id"]
+                for _sfx in ["file", "gate", "color", "op"]:
+                    st.session_state.pop(f"_ovl_{_sfx}_{r}_{c}_{_lid}", None)
+                working_layers.pop(_li)
+
+        _OVERLAY_DEFAULT_COLORS = ["#d62728", "#2ca02c", "#ff7f0e", "#9467bd", "#17becf"]
+        if st.button("＋ Add layer", key=f"_add_ovl_{r}_{c}"):
+            _new_color = _OVERLAY_DEFAULT_COLORS[len(working_layers) % len(_OVERLAY_DEFAULT_COLORS)]
+            working_layers.append({
+                "file": None,
+                "color": _new_color,
+                "opacity": _default_op,
+                "gate_id": None,
+                "_id": uuid.uuid4().hex[:8],
+            })
     else:
         final_color = cfg.get("color", "#1f77b4")
+        primary_opacity = float(cfg.get("opacity", 0.5))
 
     st.divider()
     btn1, btn2 = st.columns(2)
@@ -485,23 +601,76 @@ def plot_dialog(r: int, c: int):
                 "y_ch": eff_y_ch,
                 "n_bins": n_bins,
                 "color": final_color,
+                "opacity": primary_opacity,
                 "x_transform": x_transform,
                 "y_transform": y_transform,
                 "x_cofactor": x_cofactor,
                 "y_cofactor": y_cofactor,
                 "gate_id": selected_gate_id,
+                "overlay_layers": [
+                    {k: v for k, v in l.items() if k != "_id"}
+                    for l in st.session_state.get(_ovl_key, [])
+                ] if plot_type != "Density" else [],
             }
+            st.session_state.pop(_ovl_key, None)
             if not selected_file:
                 st.session_state.seeds[(r, c)] = np.random.randint(0, 100_000)
             st.rerun()
     with btn2:
         if st.button("Cancel", use_container_width=True):
+            st.session_state.pop(_ovl_key, None)
             st.rerun()
 
 
 # ---------------------------------------------------------------------------
 # Plot rendering
 # ---------------------------------------------------------------------------
+def _resolve_layer_data(file, gate_id, x_ch, y_ch, x_transform, y_transform, plot_type, rng):
+    """Load, gate-filter, and transform data for one plot layer.
+
+    Returns (x, y_or_none, display_name). All layers share x_ch/y_ch from the
+    primary subplot config — channels are never per-layer.
+    """
+    fcs_data = st.session_state.fcs_data
+    _eff_file = file if file is not None else _DEMO_KEY
+    display_name = "Demo" if file is None else st.session_state.file_labels.get(file, file)
+
+    if _eff_file in fcs_data:
+        _df_all = fcs_data[_eff_file]["data"]
+        if gate_id and _eff_file in st.session_state.gate_trees:
+            _tree = st.session_state.gate_trees[_eff_file]
+            if gate_id in _tree._gates:
+                _mask = _tree.get_mask(gate_id, _df_all)
+                df = _df_all[_mask].reset_index(drop=True)
+                display_name = f"{display_name} › {_tree.get_gate(gate_id).name}"
+            else:
+                df = _df_all
+        else:
+            df = _df_all
+        has_x = x_ch is not None and x_ch in df.columns
+    else:
+        df = None
+        has_x = False
+
+    if plot_type == "Histogram":
+        if has_x:
+            x = apply_transform(df[x_ch].values, x_transform)
+        else:
+            x_raw, _ = _demo_data(rng)
+            x = apply_transform(x_raw, x_transform)
+        return x, None, display_name
+    else:  # Scatter
+        has_y = y_ch is not None and df is not None and y_ch in df.columns
+        if has_x and has_y:
+            x = apply_transform(df[x_ch].values, x_transform)
+            y = apply_transform(df[y_ch].values, y_transform)
+        else:
+            x_raw, y_raw = _demo_data(rng)
+            x = apply_transform(x_raw, x_transform)
+            y = apply_transform(y_raw, y_transform)
+        return x, y, display_name
+
+
 def _blank_fig() -> go.Figure:
     fig = go.Figure()
     fig.update_layout(
@@ -578,6 +747,14 @@ def make_plot_fig(r: int, c: int) -> go.Figure:
     else:
         _file_df = None
 
+    _primary_name = "Demo" if file is None else st.session_state.file_labels.get(file, file)
+    if _gate_id and _eff_file in st.session_state.gate_trees:
+        _pn_tree = st.session_state.gate_trees[_eff_file]
+        if _gate_id in _pn_tree._gates:
+            _primary_name = f"{_primary_name} › {_pn_tree.get_gate(_gate_id).name}"
+    overlay_layers = cfg.get("overlay_layers", [])
+    show_legend = bool(overlay_layers)
+
     has_real_data = file and file in fcs_data and x_ch
     has_scatter_data = has_real_data and plot_type == "Scatter" and y_ch
 
@@ -597,7 +774,9 @@ def make_plot_fig(r: int, c: int) -> go.Figure:
             x=x,
             nbinsx=n_bins,
             marker_color=color,
-            opacity=0.8,
+            opacity=cfg.get("opacity", 0.8),
+            name=_primary_name,
+            showlegend=show_legend,
             hovertemplate=f"{x_label}: %{{x:.2f}}<br>Count: %{{y}}<extra></extra>",
         )
         fig = go.Figure(trace)
@@ -610,6 +789,20 @@ def make_plot_fig(r: int, c: int) -> go.Figure:
             yaxis_title="Count",
             bargap=0.02,
         )
+        if overlay_layers:
+            for _layer in overlay_layers:
+                _lx, _, _lname = _resolve_layer_data(
+                    _layer.get("file"), _layer.get("gate_id"),
+                    x_ch, None, x_transform, "Linear", "Histogram", rng,
+                )
+                fig.add_trace(go.Histogram(
+                    x=_lx, nbinsx=n_bins,
+                    marker_color=_layer.get("color", "#d62728"),
+                    opacity=_layer.get("opacity", 0.8),
+                    name=_lname, showlegend=True,
+                    hovertemplate=f"{x_label}: %{{x:.2f}}<br>Count: %{{y}}<extra></extra>",
+                ))
+            fig.update_layout(barmode="overlay")
 
     elif plot_type == "Density":
         has_density_data = has_real_data and y_ch and file in fcs_data
@@ -663,8 +856,9 @@ def make_plot_fig(r: int, c: int) -> go.Figure:
         trace = go.Scattergl(
             x=x, y=y,
             mode="markers",
-            marker=dict(size=2, opacity=0.4, color=color),
-            showlegend=False,
+            marker=dict(size=2, opacity=cfg.get("opacity", 0.4), color=color),
+            name=_primary_name,
+            showlegend=show_legend,
             hovertemplate=f"{x_label}: %{{x:.2f}}<br>{y_label}: %{{y:.2f}}<extra></extra>",
         )
         fig = go.Figure(trace)
@@ -676,6 +870,24 @@ def make_plot_fig(r: int, c: int) -> go.Figure:
             xaxis_title=x_label if has_scatter_data else None,
             yaxis_title=y_label if has_scatter_data else None,
         )
+        if overlay_layers:
+            for _layer in overlay_layers:
+                _lx, _ly, _lname = _resolve_layer_data(
+                    _layer.get("file"), _layer.get("gate_id"),
+                    x_ch, y_ch, x_transform, y_transform, "Scatter", rng,
+                )
+                fig.add_trace(go.Scattergl(
+                    x=_lx, y=_ly, mode="markers",
+                    marker=dict(size=2, opacity=_layer.get("opacity", 0.4), color=_layer.get("color", "#d62728")),
+                    name=_lname, showlegend=True,
+                    hovertemplate=f"{x_label}: %{{x:.2f}}<br>{y_label}: %{{y:.2f}}<extra></extra>",
+                ))
+
+    if show_legend:
+        fig.update_layout(legend=dict(
+            x=1, y=1, xanchor="right", yanchor="top",
+            bgcolor="rgba(255,255,255,0.7)", font=dict(size=10),
+        ))
 
     # Gate overlays on scatter/density
     _eff_x_ch = x_ch or "X"
