@@ -1477,18 +1477,9 @@ def gate_name_dialog():
         gate = pg["gate_obj"]
         name = st.text_input("Gate name", value="Gate")
 
-    saved_preset = "Red"
-    preset_options = list(PRESET_COLORS.keys()) + ["Custom"]
-    color_choice = st.radio(
-        "Color", preset_options,
-        index=preset_options.index(saved_preset),
-        horizontal=True,
-        key="_gname_color_radio",
+    chosen_color = st.color_picker(
+        "Color", value="#d62728", key="_gname_color", label_visibility="collapsed"
     )
-    if color_choice == "Custom":
-        chosen_color = st.color_picker("Color", value="#e74c3c", label_visibility="collapsed")
-    else:
-        chosen_color = PRESET_COLORS[color_choice]
 
     col1, col2 = st.columns(2)
     with col1:
